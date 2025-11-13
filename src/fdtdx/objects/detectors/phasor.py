@@ -73,7 +73,7 @@ class PhasorDetector(Detector):
         time_passed = time_step * self._config.time_step_duration
         static_scale = 2 / self.num_time_steps_recorded
 
-        E, H = E[:, *self.grid_slice], H[:, *self.grid_slice]
+        E, H = E[(slice(None),) + self.grid_slice], H[(slice(None),) + self.grid_slice]
         fields = []
         if "Ex" in self.components:
             fields.append(E[0])

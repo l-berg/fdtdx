@@ -1,4 +1,5 @@
-from typing import Self, Sequence
+from typing import Sequence
+from typing_extensions import Self
 
 import jax
 import jax.numpy as jnp

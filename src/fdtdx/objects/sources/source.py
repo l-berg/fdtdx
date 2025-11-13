@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
-from typing import Literal, Self
+from typing import Literal
+from typing_extensions import Self
 
 import jax
 import jax.numpy as jnp
@@ -165,7 +166,7 @@ class HardConstantAmplitudePlanceSource(DirectionalPlaneSourceBase):
         )
         E_update = e_pol[:, None, None, None] * magnitude
 
-        E = E.at[:, *self.grid_slice].set(E_update.astype(E.dtype))
+        E = E.at[(slice(None),) + self.grid_slice].set(E_update.astype(E.dtype))
         return E
 
     def update_H(
@@ -191,5 +192,5 @@ class HardConstantAmplitudePlanceSource(DirectionalPlaneSourceBase):
         )
         H_update = h_pol[:, None, None, None] * magnitude
 
-        H = H.at[:, *self.grid_slice].set(H_update.astype(H.dtype))
+        H = H.at[(slice(None),) + self.grid_slice].set(H_update.astype(H.dtype))
         return H

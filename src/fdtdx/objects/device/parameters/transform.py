@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
-from typing import Self, Sequence
+from typing import Sequence
+from typing_extensions import Self
 
 import jax
 

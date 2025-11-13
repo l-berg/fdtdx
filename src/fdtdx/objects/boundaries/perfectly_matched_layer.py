@@ -209,9 +209,9 @@ class PerfectlyMatchedLayer(BaseBoundary):
         boundary_state: BoundaryState,
         H: jax.Array,
     ) -> BoundaryState:
-        Hx = H[0, *self.grid_slice]
-        Hy = H[1, *self.grid_slice]
-        Hz = H[2, *self.grid_slice]
+        Hx = H[(0,) + self.grid_slice]
+        Hy = H[(1,) + self.grid_slice]
+        Hz = H[(2,) + self.grid_slice]
 
         psi_Ex = boundary_state.psi_Ex * boundary_state.bE
         psi_Ey = boundary_state.psi_Ey * boundary_state.bE
@@ -255,9 +255,9 @@ class PerfectlyMatchedLayer(BaseBoundary):
         boundary_state: BoundaryState,
         E: jax.Array,
     ) -> BoundaryState:
-        Ex = E[0, *self.grid_slice]
-        Ey = E[1, *self.grid_slice]
-        Ez = E[2, *self.grid_slice]
+        Ex = E[(0,) + self.grid_slice]
+        Ey = E[(1,) + self.grid_slice]
+        Ez = E[(2,) + self.grid_slice]
 
         psi_Hx = boundary_state.psi_Hx * boundary_state.bH
         psi_Hy = boundary_state.psi_Hy * boundary_state.bH
@@ -307,10 +307,10 @@ class PerfectlyMatchedLayer(BaseBoundary):
         phi_Ez = boundary_state.psi_Ez[0] - boundary_state.psi_Ez[1]
         phi_E = jnp.stack((phi_Ex, phi_Ey, phi_Ez), axis=0)
 
-        E = E.at[:, *self.grid_slice].divide(boundary_state.kappa)
+        E = E.at[(slice(None),) + self.grid_slice].divide(boundary_state.kappa)
         inv_perm_slice = inverse_permittivity[self.grid_slice]
         update = self._config.courant_number * inv_perm_slice * phi_E
-        E = E.at[:, *self.grid_slice].add(update)
+        E = E.at[(slice(None),) + self.grid_slice].add(update)
         return E
 
     def update_H(
@@ -324,9 +324,9 @@ class PerfectlyMatchedLayer(BaseBoundary):
         phi_Hz = boundary_state.psi_Hz[0] - boundary_state.psi_Hz[1]
         phi_H = jnp.stack((phi_Hx, phi_Hy, phi_Hz), axis=0)
 
-        H = H.at[:, *self.grid_slice].divide(boundary_state.kappa)
+        H = H.at[(slice(None),) + self.grid_slice].divide(boundary_state.kappa)
         if isinstance(inverse_permeability, jax.Array) and inverse_permeability.ndim > 0:
             inverse_permeability = inverse_permeability[self.grid_slice]
         update = -self._config.courant_number * inverse_permeability * phi_H
-        H = H.at[:, *self.grid_slice].add(update)
+        H = H.at[(slice(None),) + self.grid_slice].add(update)
         return H

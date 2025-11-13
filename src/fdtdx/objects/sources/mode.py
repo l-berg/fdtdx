@@ -1,5 +1,6 @@
 from pathlib import Path
-from typing import Literal, Self
+from typing import Literal
+from typing_extensions import Self
 
 import jax
 import jax.numpy as jnp
@@ -41,9 +42,9 @@ class ModePlaneSource(TFSFPlaneSource):
         ):
             raise NotImplementedError()
 
-        inv_permittivity_slice = inv_permittivities[*self.grid_slice]
+        inv_permittivity_slice = inv_permittivities[self.grid_slice]
         if isinstance(inv_permeabilities, jax.Array) and inv_permeabilities.ndim > 0:
-            inv_permeability_slice = inv_permeabilities[*self.grid_slice]
+            inv_permeability_slice = inv_permeabilities[self.grid_slice]
         else:
             inv_permeability_slice = inv_permeabilities
 
@@ -69,9 +70,9 @@ class ModePlaneSource(TFSFPlaneSource):
             [round(self.grid_shape[self.horizontal_axis]), round(self.grid_shape[self.vertical_axis])], dtype=jnp.int32
         )
 
-        inv_permittivity_slice = inv_permittivities[*self.grid_slice]
+        inv_permittivity_slice = inv_permittivities[self.grid_slice]
         if isinstance(inv_permeabilities, jax.Array) and inv_permeabilities.ndim > 0:
-            inv_permeability_slice = inv_permeabilities[*self.grid_slice]
+            inv_permeability_slice = inv_permeabilities[self.grid_slice]
         else:
             inv_permeability_slice = inv_permeabilities
 

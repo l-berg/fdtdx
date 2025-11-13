@@ -137,7 +137,7 @@ class GaussianSmoothing2D(SameShapeTypeParameterTransform):
             kernel,
             mode="same",
         )
-        result = result[*orig_slice]
+        result = result[orig_slice]
 
         # Reshape back to original dimensions
         return result.reshape(x.shape)

@@ -1,6 +1,7 @@
 from abc import ABC
 from dataclasses import dataclass
-from typing import Literal, Optional, Self
+from typing import Literal, Optional
+from typing_extensions import Self
 
 import jax
 

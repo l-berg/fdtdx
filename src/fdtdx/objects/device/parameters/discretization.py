@@ -1,5 +1,6 @@
 import math
-from typing import Literal, Self, Sequence
+from typing import Literal, Sequence
+from typing_extensions import Self
 
 import equinox.internal as eqxi
 import jax

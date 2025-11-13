@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Self
+from typing_extensions import Self
 
 import jax
 import jax.numpy as jnp

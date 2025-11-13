@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Self
+from typing_extensions import Self
 
 import jax
 import jax.numpy as jnp
@@ -184,7 +184,7 @@ class TFSFPlaneSource(DirectionalPlaneSourceBase, ABC):
             raise Exception("Need to apply random key before calling update")
 
         delta_t = self._config.time_step_duration
-        inv_permittivity_slice = inv_permittivities[*self.grid_slice]
+        inv_permittivity_slice = inv_permittivities[self.grid_slice]
 
         # Calculate time points for E and H fields
         time_H_h = (time_step + self._time_offset_H[self.horizontal_axis]) * delta_t
@@ -222,9 +222,9 @@ class TFSFPlaneSource(DirectionalPlaneSourceBase, ABC):
             sign = -sign
 
         # update uses -H_v, we have to subtract update, resulting in +H_v
-        E = E.at[self.horizontal_axis, *self.grid_slice].add(sign * H_v_inc)
+        E = E.at[(self.horizontal_axis,) + self.grid_slice].add(sign * H_v_inc)
         # update uses +H_h, we have to subtract update, resulting in -H_h
-        E = E.at[self.vertical_axis, *self.grid_slice].add(-sign * H_h_inc)
+        E = E.at[(self.vertical_axis,) + self.grid_slice].add(-sign * H_h_inc)
 
         return E
 
@@ -242,7 +242,7 @@ class TFSFPlaneSource(DirectionalPlaneSourceBase, ABC):
 
         delta_t = self._config.time_step_duration
         if isinstance(inv_permeabilities, jax.Array) and inv_permeabilities.ndim > 0:
-            inv_permeability_slice = inv_permeabilities[*self.grid_slice]
+            inv_permeability_slice = inv_permeabilities[self.grid_slice]
         else:
             inv_permeability_slice = inv_permeabilities
 
@@ -282,8 +282,8 @@ class TFSFPlaneSource(DirectionalPlaneSourceBase, ABC):
             sign = -sign
 
         # update used +E_h, we have to add update, resulting in +E_h
-        H = H.at[self.vertical_axis, *self.grid_slice].add(sign * E_h_inc)
+        H = H.at[(self.vertical_axis,) + self.grid_slice].add(sign * E_h_inc)
         # update used -E_v, we have to add update, resulting in -E_v
-        H = H.at[self.horizontal_axis, *self.grid_slice].add(-sign * E_v_inc)
+        H = H.at[(self.horizontal_axis,) + self.grid_slice].add(-sign * E_v_inc)
 
         return H

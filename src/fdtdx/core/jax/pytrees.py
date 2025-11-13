@@ -1,4 +1,5 @@
-from typing import Any, Self, Sequence, TypeVar, overload
+from typing import Any, Sequence, TypeVar, overload
+from typing_extensions import Self
 
 import pytreeclass as tc
 from pytreeclass._src.code_build import (

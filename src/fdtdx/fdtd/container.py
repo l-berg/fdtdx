@@ -5,7 +5,8 @@ and array data within FDTD simulations. It includes support for different object
 like sources, detectors, PML boundaries, periodic boundaries, and devices.
 """
 
-from typing import Callable, Self
+from typing import Callable
+from typing_extensions import Self
 
 import jax
 

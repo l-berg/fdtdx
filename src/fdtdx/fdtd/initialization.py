@@ -154,7 +154,7 @@ def apply_params(
             new_perm_slice = jnp.asarray(allowed_perm_list)[cur_material_indices.astype(jnp.int32)]
             new_perm_slice = straight_through_estimator(cur_material_indices, new_perm_slice)
             new_perm_slice = 1 / new_perm_slice
-        new_perm = arrays.inv_permittivities.at[*device.grid_slice].set(new_perm_slice)
+        new_perm = arrays.inv_permittivities.at[device.grid_slice].set(new_perm_slice)
         arrays = arrays.at["inv_permittivities"].set(new_perm)
 
     # apply random key to sources
@@ -265,41 +265,41 @@ def _init_arrays(
     info = {}
     for o in sorted_obj:
         if isinstance(o, UniformMaterialObject):
-            inv_permittivities = inv_permittivities.at[*o.grid_slice].set(1 / o.material.permittivity)
+            inv_permittivities = inv_permittivities.at[o.grid_slice].set(1 / o.material.permittivity)
             if isinstance(inv_permeabilities, jax.Array) and inv_permeabilities.ndim > 0:
-                inv_permeabilities = inv_permeabilities.at[*o.grid_slice].set(1 / o.material.permeability)
+                inv_permeabilities = inv_permeabilities.at[o.grid_slice].set(1 / o.material.permeability)
             if electric_conductivity is not None:
                 # scale by grid size
                 cond = o.material.electric_conductivity * config.resolution
-                electric_conductivity = electric_conductivity.at[*o.grid_slice].set(cond)
+                electric_conductivity = electric_conductivity.at[o.grid_slice].set(cond)
             if magnetic_conductivity is not None:
                 # scale by grid size
                 cond = o.material.magnetic_conductivity * config.resolution
-                magnetic_conductivity = magnetic_conductivity.at[*o.grid_slice].set(cond)
+                magnetic_conductivity = magnetic_conductivity.at[o.grid_slice].set(cond)
         elif isinstance(o, (StaticMultiMaterialObject)):
             indices = o.get_material_mapping()
             mask = o.get_voxel_mask_for_shape()
 
             allowed_inv_perms = 1 / jnp.asarray(compute_allowed_permittivities(o.materials))
-            diff = allowed_inv_perms[indices] - inv_permittivities[*o.grid_slice]
-            inv_permittivities = inv_permittivities.at[*o.grid_slice].add(mask * diff)
+            diff = allowed_inv_perms[indices] - inv_permittivities[o.grid_slice]
+            inv_permittivities = inv_permittivities.at[o.grid_slice].add(mask * diff)
 
             if isinstance(inv_permeabilities, jax.Array) and inv_permeabilities.ndim > 0:
                 allowed_inv_perms = 1 / jnp.asarray(compute_allowed_permeabilities(o.materials))
-                diff = allowed_inv_perms[indices] - inv_permeabilities[*o.grid_slice]
-                inv_permeabilities = inv_permeabilities.at[*o.grid_slice].add(mask * diff)
+                diff = allowed_inv_perms[indices] - inv_permeabilities[o.grid_slice]
+                inv_permeabilities = inv_permeabilities.at[o.grid_slice].add(mask * diff)
 
             if electric_conductivity is not None:
                 allowed_conds = jnp.asarray(compute_allowed_electric_conductivities(o.materials))
                 update = allowed_conds[indices] * config.resolution
-                diff = update - electric_conductivity[*o.grid_slice]
-                electric_conductivity = electric_conductivity.at[*o.grid_slice].add(mask * diff)
+                diff = update - electric_conductivity[o.grid_slice]
+                electric_conductivity = electric_conductivity.at[o.grid_slice].add(mask * diff)
 
             if magnetic_conductivity is not None:
                 allowed_conds = jnp.asarray(compute_allowed_magnetic_conductivities(o.materials))
                 update = allowed_conds[indices] * config.resolution
-                diff = update - magnetic_conductivity[*o.grid_slice]
-                magnetic_conductivity = magnetic_conductivity.at[*o.grid_slice].add(mask * diff)
+                diff = update - magnetic_conductivity[o.grid_slice]
+                magnetic_conductivity = magnetic_conductivity.at[o.grid_slice].add(mask * diff)
         else:
             raise Exception(f"Unknown object type: {o}")
 
