@@ -48,6 +48,7 @@ class Device(OrderableObject, ABC):
     color: tuple[float, float, float] | None = frozen_field(default=PINK)
     partial_voxel_grid_shape: PartialGridShape3D = frozen_field(default=UNDEFINED_SHAPE_3D)
     partial_voxel_real_shape: PartialRealShape3D = frozen_field(default=UNDEFINED_SHAPE_3D)
+    use_etching: bool = frozen_field(default=False)
 
     _single_voxel_grid_shape: tuple[int, int, int] = frozen_private_field(default=INVALID_SHAPE_3D)
 
@@ -171,7 +172,12 @@ class Device(OrderableObject, ABC):
 
         # set own input shape dtype
         self = self.aset("param_transforms", module_list)
-        if self.output_type == ParameterType.CONTINUOUS and len(self.materials) != 2:
+        if self.use_etching and self.output_type == ParameterType.CONTINUOUS and len(self.materials) != 1:
+            raise Exception(
+                f"Need exactly one material in device which replaces the eroded original materials, "
+                f"but got {self.materials}"
+            )
+        elif not self.use_etching and self.output_type == ParameterType.CONTINUOUS and len(self.materials) != 2:
             raise Exception(
                 f"Need exactly two materials in device when parameter mapping outputs continuous permittivity indices, "
                 f"but got {self.materials}"

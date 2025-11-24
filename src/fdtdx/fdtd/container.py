@@ -211,6 +211,7 @@ class ArrayContainer(TreeClass):
     recording_state: RecordingState | None
     electric_conductivity: jax.Array | None = None
     magnetic_conductivity: jax.Array | None = None
+    initial_inv_permittivities: jax.Array | None = None
 
 
 # time step and arrays

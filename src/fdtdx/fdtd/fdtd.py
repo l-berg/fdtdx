@@ -102,6 +102,7 @@ def reversible_fdtd(
             recording_state=recording_state,
             electric_conductivity=arrays.electric_conductivity,
             magnetic_conductivity=arrays.magnetic_conductivity,
+            initial_inv_permittivities=arrays.initial_inv_permittivities,
         )
         state = reversible_fdtd_base(arr)
         return (
@@ -184,6 +185,7 @@ def reversible_fdtd(
             recording_state=res_recording_state,
             electric_conductivity=arrays.electric_conductivity,
             magnetic_conductivity=arrays.magnetic_conductivity,
+            initial_inv_permittivities=arrays.initial_inv_permittivities,
         )
 
         _, cot = eqxi.while_loop(
@@ -221,6 +223,7 @@ def reversible_fdtd(
             recording_state=recording_state,
             electric_conductivity=arrays.electric_conductivity,
             magnetic_conductivity=arrays.magnetic_conductivity,
+            initial_inv_permittivities=arrays.initial_inv_permittivities,
         )
         s_k = reversible_fdtd_base(arr)
 
@@ -276,6 +279,7 @@ def reversible_fdtd(
         recording_state=recording_state,
         electric_conductivity=arrays.electric_conductivity,
         magnetic_conductivity=arrays.magnetic_conductivity,
+        initial_inv_permittivities=arrays.initial_inv_permittivities,
     )
     return time_step, out_arrs
 

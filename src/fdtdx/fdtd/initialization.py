@@ -142,20 +142,32 @@ def apply_params(
             - Dictionary with parameter application info
     """
     info = {}
+
+    if arrays.initial_inv_permittivities is not None:
+        arrays = arrays.at["inv_permittivities"].set(arrays.initial_inv_permittivities)
+
     # apply parameter to devices
     for device in objects.devices:
         cur_material_indices = device(params[device.name], expand_to_sim_grid=True, **transform_kwargs)
         allowed_perm_list = compute_allowed_permittivities(device.materials)
-        if device.output_type == ParameterType.CONTINUOUS:
-            first_term = (1 - cur_material_indices) * (1 / allowed_perm_list[0])
-            second_term = cur_material_indices * (1 / allowed_perm_list[1])
-            new_perm_slice = first_term + second_term
+        if device.use_etching:
+            # TODO: ParameterType.DISCRETE? should work fine here. why is there a difference then?
+            etched_inv_perm = 1 / allowed_perm_list[0]
+            # diff = allowed_inv_perms[indices] - inv_permittivities[o.grid_slice]
+            diff = etched_inv_perm - arrays.inv_permittivities[device.grid_slice]
+            new_perm = arrays.inv_permittivities.at[device.grid_slice].add(cur_material_indices * diff)
+            arrays = arrays.at["inv_permittivities"].set(new_perm)
         else:
-            new_perm_slice = jnp.asarray(allowed_perm_list)[cur_material_indices.astype(jnp.int32)]
-            new_perm_slice = straight_through_estimator(cur_material_indices, new_perm_slice)
-            new_perm_slice = 1 / new_perm_slice
-        new_perm = arrays.inv_permittivities.at[device.grid_slice].set(new_perm_slice)
-        arrays = arrays.at["inv_permittivities"].set(new_perm)
+            if device.output_type == ParameterType.CONTINUOUS:
+                first_term = (1 - cur_material_indices) * (1 / allowed_perm_list[0])
+                second_term = cur_material_indices * (1 / allowed_perm_list[1])
+                new_perm_slice = first_term + second_term
+            else:
+                new_perm_slice = jnp.asarray(allowed_perm_list)[cur_material_indices.astype(jnp.int32)]
+                new_perm_slice = straight_through_estimator(cur_material_indices, new_perm_slice)
+                new_perm_slice = 1 / new_perm_slice
+            new_perm = arrays.inv_permittivities.at[device.grid_slice].set(new_perm_slice)
+            arrays = arrays.at["inv_permittivities"].set(new_perm)
 
     # apply random key to sources
     new_objects = []
@@ -334,6 +346,10 @@ def _init_arrays(
         )
         config = config.aset("gradient_config", grad_cfg)
 
+    # save backup of initial inv_permittivities when using etching
+    using_etching = any(d.use_etching for d in objects.devices)
+    initial_inv_permittivities = jnp.copy(inv_permittivities) if using_etching else None
+
     arrays = ArrayContainer(
         E=E,
         H=H,
@@ -344,6 +360,7 @@ def _init_arrays(
         recording_state=recording_state,
         electric_conductivity=electric_conductivity,
         magnetic_conductivity=magnetic_conductivity,
+        initial_inv_permittivities=initial_inv_permittivities,
     )
     return arrays, config, info
 
