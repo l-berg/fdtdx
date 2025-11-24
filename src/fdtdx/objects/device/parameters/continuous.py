@@ -125,7 +125,7 @@ class GaussianSmoothing2D(SameShapeTypeParameterTransform):
             raise ValueError(f"Expected 2D array, got shape {x_squeezed.shape}")
 
         # Create Gaussian kernel
-        kernel_size = 6 * self.std_discrete + 1  # Ensure kernel covers 3 std on each side
+        kernel_size = math.ceil(6 * self.std_discrete) + 1  # Ensure kernel covers 3 std on each side
         kernel = self._create_gaussian_kernel(kernel_size, self.std_discrete)
 
         # pad array with edge values
