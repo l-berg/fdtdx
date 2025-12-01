@@ -18,6 +18,7 @@ from fdtdx.objects.sources.tfsf import TFSFPlaneSource
 class ModePlaneSource(TFSFPlaneSource):
     mode_index: int = frozen_field(default=0)
     filter_pol: Literal["te", "tm"] | None = frozen_field(default=None)
+    edge_padding: int | None = frozen_field(default=None)
 
     _inv_permittivity: jax.Array = private_field()
     _inv_permeability: jax.Array | float = private_field()
@@ -90,6 +91,7 @@ class ModePlaneSource(TFSFPlaneSource):
             direction=self.direction,
             mode_index=self.mode_index,
             filter_pol=self.filter_pol,
+            edge_padding=self.edge_padding,
         )
         mode_E, mode_H = jnp.real(mode_E), jnp.real(mode_H)
 

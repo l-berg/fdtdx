@@ -95,6 +95,7 @@ def compute_mode(
     direction: Literal["+", "-"],
     mode_index: int = 0,
     filter_pol: Literal["te", "tm"] | None = None,
+    edge_padding: int | None = None,
 ) -> tuple[
     jax.Array,  # E
     jax.Array,  # H
@@ -109,6 +110,13 @@ def compute_mode(
         # raise Exception("Mode solver currently does not support metallic materials")
 
     def mode_helper(permittivity, permeability):
+        if edge_padding:
+            permittivity = np.pad(permittivity, pad_width=edge_padding, mode='edge')
+            permeability = np.pad(permeability, pad_width=edge_padding, mode='edge')
+
+        # coords = [np.arange(permittivity.shape[dim] + 1) * resolution / 1e-6 for dim in range(permittivity.ndim)]
+        coords = [np.linspace(0, size * resolution / 1e-6, size + 1) for size in permittivity.shape]
+
         modes = tidy3d_mode_computation_wrapper(
             frequency=frequency,
             permittivity_cross_section=permittivity,
@@ -117,6 +125,17 @@ def compute_mode(
             direction=direction,
             num_modes=2 * (mode_index + 1) + 10,
         )
+
+        if edge_padding:
+            # slicing Operation
+            sl = np.s_[edge_padding:-edge_padding, edge_padding:-edge_padding]
+            modes = [ModeTupleType(*(
+                val if field == 'neff' else val[sl] 
+                for field, val in zip(mode._fields, mode)
+            )) for mode in modes]
+
+        # def revert_edge_padding(x):
+        #     return x[edge_padding:-edge_padding, edge_padding:-edge_padding]
 
         # sort modes by polarization
         # tidy3d assumes propagation in the z-direction. The tangential axes are therefore x and y.
@@ -148,7 +167,6 @@ def compute_mode(
     permittivities = 1 / inv_permittivities
     other_axes = [a for a in range(3) if permittivities.shape[a] != 1]
     propagation_axis = permittivities.shape.index(1)
-    coords = [np.arange(permittivities.shape[dim] + 1) * resolution / 1e-6 for dim in other_axes]
     permittivity_squeezed = jnp.take(
         permittivities,
         indices=0,
