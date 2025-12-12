@@ -2,6 +2,58 @@ import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 from matplotlib.figure import Figure
+from matplotlib.colors import LogNorm
+
+
+def plot_2d_slice(
+    slice: np.ndarray,
+    resolutions: tuple[float, float, float],
+    normal_axis: int,
+    minval: float | None = None,
+    maxval: float | None = None,
+    plot_interpolation: str = "gaussian",
+    plot_dpi: int | None = None,
+) -> Figure:
+    if minval is None:
+        minval = slice.min()
+    if maxval is None:
+        maxval = slice.max()
+
+    fig = plt.figure(figsize=(8, 6), dpi=plot_dpi)
+    # cmap = sns.diverging_palette(220, 20, as_cmap=True)
+    colorbar_shrink = 0.5
+
+    axis_names = ['X', 'Y', 'Z']
+    del axis_names[normal_axis]
+
+    res = list(np.array(resolutions) / 1.0e-6)  # Convert to µm
+    del res[normal_axis]
+
+    # Create XY plane plot
+    ax = fig.add_subplot()
+    extent = (
+        0,
+        slice.shape[0] * res[0],
+        0,
+        slice.shape[1] * res[1],
+    )
+    cax = ax.imshow(
+        slice.T,
+        # cmap=cmap,
+        # vmin=minval, # cannot be used when using norm
+        # vmax=maxval,
+        norm=LogNorm(vmin=maxval * 10**-3, vmax=maxval),
+        extent=extent,
+        interpolation=plot_interpolation,
+        aspect="equal",
+        origin="lower",
+    )
+    ax.set_xlabel(f"{axis_names[0]} axis (µm)")
+    ax.set_ylabel(f"{axis_names[1]} axis (µm)")
+
+    plt.colorbar(mappable=cax, ax=ax, shrink=colorbar_shrink)
+
+    return fig
 
 
 def plot_2d_from_slices(

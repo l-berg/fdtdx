@@ -12,7 +12,7 @@ from fdtdx.core.jax.pytrees import autoinit, frozen_field, frozen_private_field,
 from fdtdx.core.plotting.colors import LIGHT_GREEN
 from fdtdx.core.switch import OnOffSwitch
 from fdtdx.objects.detectors.plotting.line_plot import plot_line_over_time, plot_waterfall_over_time
-from fdtdx.objects.detectors.plotting.plot2d import plot_2d_from_slices
+from fdtdx.objects.detectors.plotting.plot2d import plot_2d_from_slices, plot_2d_slice
 from fdtdx.objects.detectors.plotting.video import generate_video_from_slices, plot_from_slices
 from fdtdx.objects.object import SimulationObject
 from fdtdx.typing import SliceTuple3D
@@ -287,13 +287,10 @@ class Detector(SimulationObject, ABC):
         elif squeezed_ndim == 3 and self.num_time_steps_recorded > 1:
             # multiple time steps, 2d-plots
             if all([x in squeezed_arrs.keys() for x in ["XY Plane", "XZ Plane", "YZ Plane"]]):
-                path = generate_video_from_slices(
-                    plt_fn=plot_from_slices,
-                    xy_slice=squeezed_arrs["XY Plane"],
-                    xz_slice=squeezed_arrs["XZ Plane"],
-                    yz_slice=squeezed_arrs["YZ Plane"],
-                    progress=progress,
-                    num_worker=self.num_video_workers,
+                fig = plot_2d_from_slices(
+                    xy_slice=squeezed_arrs["XY Plane"].mean(axis=0),
+                    xz_slice=squeezed_arrs["XZ Plane"].mean(axis=0),
+                    yz_slice=squeezed_arrs["YZ Plane"].mean(axis=0),
                     resolutions=(
                         self._config.resolution,
                         self._config.resolution,
@@ -302,7 +299,38 @@ class Detector(SimulationObject, ABC):
                     plot_dpi=self.plot_dpi,
                     plot_interpolation=self.plot_interpolation,
                 )
-                figs["sliced_video"] = path
+                figs["sliced_plot"] = fig
+                # path = generate_video_from_slices(
+                #     plt_fn=plot_from_slices,
+                #     xy_slice=squeezed_arrs["XY Plane"],
+                #     xz_slice=squeezed_arrs["XZ Plane"],
+                #     yz_slice=squeezed_arrs["YZ Plane"],
+                #     progress=progress,
+                #     num_worker=self.num_video_workers,
+                #     resolutions=(
+                #         self._config.resolution,
+                #         self._config.resolution,
+                #         self._config.resolution,
+                #     ),
+                #     plot_dpi=self.plot_dpi,
+                #     plot_interpolation=self.plot_interpolation,
+                # )
+                # figs["sliced_video"] = path
+            elif "phasor" in squeezed_arrs:
+                phasor_arr = squeezed_arrs["phasor"]
+                assert phasor_arr.shape[0] == 3 # either E field or H field
+                intensities = jnp.sum(jnp.real(phasor_arr * jnp.conj(phasor_arr)), axis=0) # really its energies: |E|^2
+                normal_axis = self.grid_shape.index(1)
+                fig = plot_2d_slice(
+                    slice=intensities,
+                    resolutions=(
+                        self._config.resolution,
+                        self._config.resolution,
+                        self._config.resolution,
+                    ),
+                    normal_axis=normal_axis,
+                )
+                figs["phasor"] = fig
             else:
                 raise Exception(
                     f"Cannot plot {squeezed_arrs.keys()}. "
