@@ -17,17 +17,12 @@ class LinearlyPolarizedPlaneSource(TFSFPlaneSource, ABC):
     fixed_H_polarization_vector: tuple[float, float, float] | None = frozen_field(default=None)
     normalize_by_energy: bool = frozen_field(default=True)
 
-    def get_EH_variation(
+    def apply(
         self,
         key: jax.Array,
         inv_permittivities: jax.Array,
         inv_permeabilities: jax.Array | float,
-    ) -> tuple[
-        jax.Array,  # E: (3, *grid_shape)
-        jax.Array,  # H: (3, *grid_shape)
-        jax.Array,  # time_offset_E: (3, *grid_shape)
-        jax.Array,  # time_offset_H: (3, *grid_shape)
-    ]:
+    ):
         inv_permittivities = inv_permittivities[self.grid_slice]
         if isinstance(inv_permeabilities, jax.Array) and inv_permeabilities.ndim > 0:
             inv_permeabilities = inv_permeabilities[self.grid_slice]
@@ -116,7 +111,12 @@ class LinearlyPolarizedPlaneSource(TFSFPlaneSource, ABC):
             time_step_duration=self._config.time_step_duration,
         )
 
-        return E, H, time_offset_E, time_offset_H
+        self = self.aset("_E", E, create_new_ok=True)
+        self = self.aset("_H", H, create_new_ok=True)
+        self = self.aset("_time_offset_E", time_offset_E, create_new_ok=True)
+        self = self.aset("_time_offset_H", time_offset_H, create_new_ok=True)
+
+        return self
 
     @abstractmethod
     def _get_amplitude_raw(
