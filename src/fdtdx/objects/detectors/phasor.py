@@ -1,4 +1,7 @@
 from typing import Literal, Sequence
+from matplotlib.figure import Figure
+from rich.progress import Progress
+import numpy as np
 
 import jax
 import jax.numpy as jnp
@@ -6,6 +9,7 @@ import jax.numpy as jnp
 from fdtdx.core.jax.pytrees import autoinit, field, frozen_field
 from fdtdx.core.wavelength import WaveCharacter
 from fdtdx.objects.detectors.detector import Detector, DetectorState
+from fdtdx.objects.detectors.plotting.plot2d import plot_2d_from_slices, plot_2d_slice
 
 
 @autoinit
@@ -58,7 +62,7 @@ class PhasorDetector(Detector):
         num_frequencies = len(self._angular_frequencies)
         grid_shape = self.grid_shape if not self.reduce_volume else tuple([])
         phasor_shape = (num_frequencies, num_components, *grid_shape)
-        return {"phasor": jax.ShapeDtypeStruct(shape=phasor_shape, dtype=field_dtype)}
+        return {"phasor": jax.ShapeDtypeStruct(shape=phasor_shape, dtype=field_dtype), "permittivity_slice": jax.ShapeDtypeStruct(shape=self.grid_shape, dtype=jnp.float32)}
 
     def update(
         self,
@@ -69,7 +73,7 @@ class PhasorDetector(Detector):
         inv_permittivity: jax.Array,
         inv_permeability: jax.Array | float,
     ) -> DetectorState:
-        del inv_permeability, inv_permittivity
+        del inv_permeability #, inv_permittivity
         time_passed = time_step * self._config.time_step_duration
         static_scale = 2 / self.num_time_steps_recorded
 
@@ -104,4 +108,49 @@ class PhasorDetector(Detector):
             result = state["phasor"] - new_phasors[None, ...]
         else:
             result = state["phasor"] + new_phasors[None, ...]
-        return {"phasor": result.astype(self.dtype)}
+        return {"phasor": result.astype(self.dtype), "permittivity_slice": inv_permittivity[self.grid_slice].astype(jnp.float32)[None, ...]}
+
+    def draw_plot(
+        self,
+        state: dict[str, np.ndarray],
+        progress: Progress | None = None,
+    ) -> dict[str, Figure | str]:
+        """Custom phasor plotting.
+
+        Args:
+            state (dict[str, np.ndarray]): Dictionary containing recorded field data arrays.
+            progress (Progress | None, optional): Optional progress bar for video generation.
+
+        Returns:
+            dict[str, Figure | str]: Dictionary mapping plot names to either
+                matplotlib Figure objects or paths to generated video files.
+        """
+        squeezed_arrs = {}
+        for k, v in state.items():
+            v_squeezed = v.squeeze()
+            if self.inverse and self.if_inverse_plot_backwards and self.num_time_steps_recorded > 1:
+                squeezed_arrs[k] = v_squeezed[::-1, ...]
+            else:
+                squeezed_arrs[k] = v_squeezed
+
+        figs = {}
+        phasor_arr = squeezed_arrs["phasor"]
+        permittivity_slice = squeezed_arrs["permittivity_slice"]
+        assert phasor_arr.shape[0] == 3 # either E field or H field
+        intensities = jnp.sum(jnp.real(phasor_arr * jnp.conj(phasor_arr)), axis=0) # really its energies: |E|^2
+
+        normal_axis = self.grid_shape.index(1)
+        fig = plot_2d_slice(
+            slice=intensities,
+            resolutions=(
+                self._config.resolution,
+                self._config.resolution,
+                self._config.resolution,
+            ),
+            normal_axis=normal_axis,
+            log_scale=True,
+            contour_slice=permittivity_slice,
+        )
+        figs["phasor"] = fig
+        return figs
+

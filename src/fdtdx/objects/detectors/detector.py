@@ -329,6 +329,7 @@ class Detector(SimulationObject, ABC):
                         self._config.resolution,
                     ),
                     normal_axis=normal_axis,
+                    log_scale=True,
                 )
                 figs["phasor"] = fig
             else:

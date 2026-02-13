@@ -13,6 +13,8 @@ def plot_2d_slice(
     maxval: float | None = None,
     plot_interpolation: str = "gaussian",
     plot_dpi: int | None = None,
+    log_scale: bool = False,
+    contour_slice: np.ndarray | None = None,
 ) -> Figure:
     if minval is None:
         minval = slice.min()
@@ -37,21 +39,36 @@ def plot_2d_slice(
         0,
         slice.shape[1] * res[1],
     )
-    cax = ax.imshow(
-        slice.T,
-        # cmap=cmap,
-        # vmin=minval, # cannot be used when using norm
-        # vmax=maxval,
-        norm=LogNorm(vmin=maxval * 10**-3, vmax=maxval),
-        extent=extent,
-        interpolation=plot_interpolation,
-        aspect="equal",
-        origin="lower",
-    )
+    if log_scale:
+        cax = ax.imshow(
+            slice.T,
+            # cmap=cmap,
+            # vmin=minval, # cannot be used when using norm
+            # vmax=maxval,
+            norm=LogNorm(vmin=maxval * 10**-3, vmax=maxval),
+            extent=extent,
+            interpolation=plot_interpolation,
+            aspect="equal",
+            origin="lower",
+        )
+    else:
+        cax = ax.imshow(
+            slice.T,
+            # cmap=cmap,
+            vmin=minval, # cannot be used when using norm
+            vmax=maxval,
+            extent=extent,
+            interpolation=plot_interpolation,
+            aspect="equal",
+            origin="lower",
+        )
     ax.set_xlabel(f"{axis_names[0]} axis (µm)")
     ax.set_ylabel(f"{axis_names[1]} axis (µm)")
 
     plt.colorbar(mappable=cax, ax=ax, shrink=colorbar_shrink)
+
+    if contour_slice is not None:
+        ax.contour(contour_slice.T, origin='lower', extent=extent, alpha=1, linewidths=0.1, colors='white') #, levels=1)
 
     return fig
 
