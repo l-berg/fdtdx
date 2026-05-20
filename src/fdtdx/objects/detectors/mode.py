@@ -42,6 +42,7 @@ class ModeOverlapDetector(PhasorDetector):
     direction: Literal["+", "-"] = frozen_field()
     mode_index: int = frozen_field(default=0)
     filter_pol: Literal["te", "tm"] | None = frozen_field(default=None)
+    mode_2d: bool = frozen_field(default=False)
     edge_padding: int | None = frozen_field(default=None)
     components: Sequence[Literal["Ex", "Ey", "Ez", "Hx", "Hy", "Hz"]] = frozen_field(
         default=("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"),
@@ -96,6 +97,7 @@ class ModeOverlapDetector(PhasorDetector):
             mode_index=self.mode_index,
             filter_pol=self.filter_pol,
             edge_padding=self.edge_padding,
+            mode_2d=self.mode_2d,
         )
 
         self = self.aset("_mode_E", mode_E, create_new_ok=True)

@@ -45,7 +45,7 @@ def plot_2d_slice(
             # cmap=cmap,
             # vmin=minval, # cannot be used when using norm
             # vmax=maxval,
-            norm=LogNorm(vmin=maxval * 10**-3, vmax=maxval),
+            norm=LogNorm(vmin=maxval * 1e-4, vmax=maxval),
             extent=extent,
             interpolation=plot_interpolation,
             aspect="equal",

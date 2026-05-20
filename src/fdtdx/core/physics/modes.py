@@ -96,6 +96,7 @@ def compute_mode(
     mode_index: int = 0,
     filter_pol: Literal["te", "tm"] | None = None,
     edge_padding: int | None = None,
+    mode_2d: bool = False,
 ) -> tuple[
     jax.Array,  # E
     jax.Array,  # H
@@ -110,7 +111,14 @@ def compute_mode(
         # raise Exception("Mode solver currently does not support metallic materials")
 
     def mode_helper(permittivity, permeability):
+        if mode_2d:
+            assert np.allclose(permittivity, permittivity[:, [0]]), "Permittivity is not uniform across the second axis!"
+            mode_2d_collapsed = permittivity.shape[1]
+            permittivity = permittivity[:, [0]]
+            if isinstance(inv_permeabilities, jax.Array) and inv_permeabilities.ndim > 0:
+                permeability = permeability[:, [0]]
         if edge_padding:
+            assert not mode_2d
             permittivity = np.pad(permittivity, pad_width=edge_padding, mode='edge')
             permeability = np.pad(permeability, pad_width=edge_padding, mode='edge')
 
@@ -123,7 +131,7 @@ def compute_mode(
             permeability_cross_section=permeability,
             coords=coords,
             direction=direction,
-            num_modes=2 * (mode_index + 1) + 10,
+            num_modes=mode_index+1 if filter_pol is None else 2 * (mode_index + 1) + 10,
         )
 
         if edge_padding:
@@ -159,6 +167,10 @@ def compute_mode(
             )
         else:
             raise Exception("This should never happen")
+        
+        if mode_2d:
+            mode_E = np.repeat(mode_E[:, :, None], mode_2d_collapsed, axis=2)
+            mode_H = np.repeat(mode_H[:, :, None], mode_2d_collapsed, axis=2)
 
         neff = np.asarray(mode.neff).astype(np.complex64)
         return mode_E, mode_H, neff
