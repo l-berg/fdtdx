@@ -10,6 +10,7 @@ from fdtdx import (
     HorizontalSymmetry3D,
     PointSymmetry2D,
     PointSymmetry3D,
+    RotationalSymmetry2D,
     VerticalSymmetry2D,
     VerticalSymmetry3D,
 )
@@ -198,6 +199,56 @@ class TestDiagonalSymmetry2D:
         """Test that output shape matches input shape."""
         test_arr = jnp.ones((4, 1, 4), dtype=jnp.float32)
         sym = DiagonalSymmetry2D(min_min_to_max_max=True)
+        result = sym({"test": test_arr})["test"]
+        assert result.shape == test_arr.shape
+
+
+class TestRotationalSymmetry2D:
+    """Tests for RotationalSymmetry2D (90-degree four-fold rotation)."""
+
+    def test_symmetry_property(self):
+        """Test that output satisfies 90-degree rotational symmetry."""
+        # Note: Must use a square 2D shape for 90-degree rotational symmetry
+        test_arr = jnp.array(
+            [
+                [[1, 2, 3, 4]],
+                [[5, 6, 7, 8]],
+                [[9, 10, 11, 12]],
+                [[13, 14, 15, 16]],
+            ],
+            dtype=jnp.float32,
+        )
+
+        sym = RotationalSymmetry2D()
+        result = sym({"test": test_arr})["test"]
+        squeezed = result.squeeze(1)
+
+        # Check symmetry: array should be identical after a 90-degree rotation
+        assert jnp.allclose(squeezed, jnp.rot90(squeezed, k=1))
+        # It should also hold true for 180 and 270 degrees
+        assert jnp.allclose(squeezed, jnp.rot90(squeezed, k=2))
+        assert jnp.allclose(squeezed, jnp.rot90(squeezed, k=3))
+
+    def test_point_reflection(self):
+        """Test that a single point is correctly rotated across four quadrants."""
+        test_arr = jnp.zeros((5, 1, 5), dtype=jnp.float32)
+        test_arr = test_arr.at[1, 0, 1].set(1.0)
+
+        sym = RotationalSymmetry2D()
+        result = sym({"test": test_arr})["test"]
+
+        # Point at [1, 0, 1] rotated 90, 180, and 270 degrees 
+        # should average out to 0.25 at all four corresponding locations
+        assert result[1, 0, 1] == 0.25
+        assert result[3, 0, 1] == 0.25
+        assert result[3, 0, 3] == 0.25
+        assert result[1, 0, 3] == 0.25
+
+    def test_shape_preserved(self):
+        """Test that output shape matches input shape."""
+        # Ensure the test shape is square
+        test_arr = jnp.ones((4, 1, 4), dtype=jnp.float32)
+        sym = RotationalSymmetry2D()
         result = sym({"test": test_arr})["test"]
         assert result.shape == test_arr.shape
 

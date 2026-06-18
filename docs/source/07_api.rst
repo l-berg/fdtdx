@@ -99,6 +99,7 @@ API
     fdtdx.RectilinearGrid
     fdtdx.RemoveFloatingMaterial
     fdtdx.resolve_object_constraints
+    fdtdx.RotationalSymmetry2D,
     fdtdx.run_fdtd
     fdtdx.setup_sparams_simulation
     fdtdx.SimulationConfig

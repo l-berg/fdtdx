@@ -88,6 +88,7 @@ from fdtdx.objects.device.parameters.symmetries import (
     HorizontalSymmetry3D,
     PointSymmetry2D,
     PointSymmetry3D,
+    RotationalSymmetry2D,
     VerticalSymmetry2D,
     VerticalSymmetry3D,
 )
@@ -206,6 +207,7 @@ __all__ = [
     "Recorder",
     "RecordingState",
     "RectilinearGrid",
+    "RotationalSymmetry2D",
     "RemoveFloatingMaterial",
     "SimulationConfig",
     "SimulationObject",

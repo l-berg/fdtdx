@@ -146,6 +146,44 @@ class PointSymmetry2D(SameShapeTypeParameterTransform):
         return result
 
 
+@autoinit
+class RotationalSymmetry2D(SameShapeTypeParameterTransform):
+    """
+    Enforce 90-degree (four-fold) rotational symmetry.
+
+    This creates a design that is symmetric under 90-degree rotation about
+    its center. The symmetry is enforced by averaging the array with its
+    90, 180, and 270-degree rotated versions. 
+    
+    Note: The 2D dimensions of the array must be square.
+    """
+
+    _all_arrays_2d: bool = frozen_private_field(default=True)
+
+    def __call__(
+        self,
+        params: dict[str, jax.Array],
+        **kwargs,
+    ) -> dict[str, jax.Array]:
+        del kwargs
+        result = {}
+        for k, v in params.items():
+            # convert to 2d
+            vertical_axis = v.shape.index(1)
+            v_2d = v.squeeze(vertical_axis)
+
+            # enforce symmetry: average over 0, 90, 180, and 270 degrees
+            rot90 = jnp.rot90(v_2d, k=1)
+            rot180 = jnp.rot90(v_2d, k=2)
+            rot270 = jnp.rot90(v_2d, k=3)
+            
+            cur_mean = (v_2d + rot90 + rot180 + rot270) / 4.0
+
+            # expand dims again
+            result[k] = jnp.expand_dims(cur_mean, vertical_axis)
+        return result
+
+
 # =============================================================================
 # 3D Symmetry Transforms
 # =============================================================================
