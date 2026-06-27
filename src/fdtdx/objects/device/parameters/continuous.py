@@ -98,11 +98,11 @@ class GaussianSmoothing2D(SameShapeTypeParameterTransform):
     which helps reduce noise and smooth the data.
 
     Attributes:
-        std_discrete (int): Integer specifying the standard deviation of the
+        std (float): Float specifying the standard deviation of the
                      Gaussian kernel in discrete units.
     """
 
-    std_discrete: int = frozen_field()
+    std: float = frozen_field()
 
     _fixed_input_type: ParameterType | Sequence[ParameterType] | None = frozen_private_field(
         default=ParameterType.CONTINUOUS
@@ -125,11 +125,12 @@ class GaussianSmoothing2D(SameShapeTypeParameterTransform):
             raise ValueError(f"Expected 2D array, got shape {x_squeezed.shape}")
 
         # Create Gaussian kernel
-        kernel_size = math.ceil(6 * self.std_discrete) + 1  # Ensure kernel covers 3 std on each side
-        kernel = self._create_gaussian_kernel(kernel_size, self.std_discrete)
+        kernel_size = math.ceil(6 * self.std) + 1  # Ensure kernel covers 3 std on each side
+        kernel = self._create_gaussian_kernel(kernel_size, self.std)
 
         # pad array with edge values
-        padding_cfg = PaddingConfig(widths=(kernel_size // 2,), modes=("edge",))
+        #padding_cfg = PaddingConfig(widths=(kernel_size // 2,), modes=("edge",))
+        padding_cfg = PaddingConfig(widths=(kernel_size // 2,), modes=("constant",), values=(0.0,))
         padded_arr, orig_slice = advanced_padding(x_squeezed, padding_cfg)
 
         result = jax.scipy.signal.convolve(

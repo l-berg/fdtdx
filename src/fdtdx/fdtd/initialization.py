@@ -152,11 +152,24 @@ def apply_params(
         allowed_perm_list = compute_allowed_permittivities(device.materials)
         if device.use_etching:
             # TODO: ParameterType.DISCRETE? should work fine here. why is there a difference then?
-            etched_inv_perm = 1 / allowed_perm_list[0]
+            #etched_inv_perm = 1 / allowed_perm_list[0]
+            etched_perm = allowed_perm_list[0]
             # diff = allowed_inv_perms[indices] - inv_permittivities[o.grid_slice]
-            diff = etched_inv_perm - arrays.inv_permittivities[device.grid_slice]
-            new_perm = arrays.inv_permittivities.at[device.grid_slice].add(cur_material_indices * diff)
-            arrays = arrays.at["inv_permittivities"].set(new_perm)
+            #if 'global_inv_permittivity_factor' in params:
+            #    inv_perm_factor = params['global_inv_permittivity_factor']
+            #    new_perm_slice = arrays.inv_permittivities[device.grid_slice] + inv_perm_factor
+            #    diff = etched_inv_perm - new_perm_slice
+            #    new_perm_slice = new_perm_slice + cur_material_indices * diff
+            #    new_perm = arrays.inv_permittivities.at[device.grid_slice].set(new_perm_slice)
+            #    #new_perm = arrays.inv_permittivities.at[device.grid_slice].add(cur_material_indices * diff)
+            #    arrays = arrays.at["inv_permittivities"].set(new_perm)
+            #else:
+            #diff = etched_inv_perm - arrays.inv_permittivities[device.grid_slice]
+            orig_perm_slice = 1/arrays.inv_permittivities[device.grid_slice]
+            new_perm_slice = orig_perm_slice + cur_material_indices * (etched_perm - orig_perm_slice)
+            new_inv_perm = arrays.inv_permittivities.at[device.grid_slice].set(1/new_perm_slice)
+            #new_perm = arrays.inv_permittivities.at[device.grid_slice].add(cur_material_indices * diff)
+            arrays = arrays.at["inv_permittivities"].set(new_inv_perm)
         else:
             if device.output_type == ParameterType.CONTINUOUS:
                 first_term = (1 - cur_material_indices) * (1 / allowed_perm_list[0])
@@ -168,6 +181,29 @@ def apply_params(
                 new_perm_slice = 1 / new_perm_slice
             new_perm = arrays.inv_permittivities.at[device.grid_slice].set(new_perm_slice)
             arrays = arrays.at["inv_permittivities"].set(new_perm)
+    
+    if 'global_inv_permittivity_factor' in params:
+        #print('HELLO HELLO ----------------------------- it worked')
+        perm_factor = params['global_inv_permittivity_factor']
+        #new_perm = arrays.inv_permittivities[device.grid_slice]
+        #new_perm = ((arrays.inv_permittivities[device.grid_slice] - 1.0) * inv_perm_factor) + 1.0
+        #new_perm = new_perm + inv_perm_factor
+        #arrays = arrays.at["inv_permittivities"].set(new_perm)
+        #new_perm = arrays.inv_permittivities.at[:].add(inv_perm_factor)
+        #new_perm = arrays.inv_permittivities.at[device.grid_slice].add(inv_perm_factor)
+        #tmp_permittivities = 1 / arrays.inv_permittivities[device.grid_slice]
+        #tmp_permittivities = ((tmp_permittivities - 1) * perm_factor) + 1
+        #new_inv_perm_slice = 1 / tmp_permittivities
+        
+        # works
+        ##new_inv_perm_slice = 1/(1 / arrays.inv_permittivities[device.grid_slice] + perm_factor)
+        ##? 
+        #new_inv_perm_slice = 1/((1 / arrays.inv_permittivities[device.grid_slice]) * perm_factor)
+        ##new_inv_perm_slice = arrays.inv_permittivities[device.grid_slice] + perm_factor
+        
+        ##new_perm_slice = ((arrays.inv_permittivities[device.grid_slice] - 1.0) * inv_perm_factor) + 1.0
+        #new_inv_perm = arrays.inv_permittivities.at[device.grid_slice].set(new_inv_perm_slice)
+        #arrays = arrays.at["inv_permittivities"].set(new_inv_perm)
 
     # apply random key to sources
     new_objects = []
@@ -288,18 +324,23 @@ def _init_arrays(
                 # scale by grid size
                 cond = o.material.magnetic_conductivity * config.resolution
                 magnetic_conductivity = magnetic_conductivity.at[o.grid_slice].set(cond)
-        elif isinstance(o, (StaticMultiMaterialObject)):
+                
+        elif isinstance(o, StaticMultiMaterialObject):
             indices = o.get_material_mapping()
             mask = o.get_voxel_mask_for_shape()
 
-            allowed_inv_perms = 1 / jnp.asarray(compute_allowed_permittivities(o.materials))
-            diff = allowed_inv_perms[indices] - inv_permittivities[o.grid_slice]
-            inv_permittivities = inv_permittivities.at[o.grid_slice].add(mask * diff)
+            current_perms = 1 / inv_permittivities[o.grid_slice]
+            allowed_perms = jnp.asarray(compute_allowed_permittivities(o.materials))
+            target_perms = allowed_perms[indices]
+            new_perms = current_perms + mask * (target_perms - current_perms)
+            inv_permittivities = inv_permittivities.at[o.grid_slice].set(1 / new_perms)
 
             if isinstance(inv_permeabilities, jax.Array) and inv_permeabilities.ndim > 0:
-                allowed_inv_perms = 1 / jnp.asarray(compute_allowed_permeabilities(o.materials))
-                diff = allowed_inv_perms[indices] - inv_permeabilities[o.grid_slice]
-                inv_permeabilities = inv_permeabilities.at[o.grid_slice].add(mask * diff)
+                current_perms_mag = 1 / inv_permeabilities[o.grid_slice]
+                allowed_perms_mag = jnp.asarray(compute_allowed_permeabilities(o.materials))
+                target_perms_mag = allowed_perms_mag[indices]
+                new_perms_mag = current_perms_mag + mask * (target_perms_mag - current_perms_mag)
+                inv_permeabilities = inv_permeabilities.at[o.grid_slice].set(1 / new_perms_mag)
 
             if electric_conductivity is not None:
                 allowed_conds = jnp.asarray(compute_allowed_electric_conductivities(o.materials))

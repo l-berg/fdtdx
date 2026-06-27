@@ -1,5 +1,6 @@
 from typing import Literal, Sequence
 from typing_extensions import Self
+from loguru import logger
 
 import jax
 import jax.numpy as jnp
@@ -49,7 +50,8 @@ class ModeOverlapDetector(PhasorDetector):
         init=False,  # in this detector, we always want all components. Do not give user a choice
     )  # noqa: DOC603, DOC601
     plot: bool = frozen_field(default=False, init=False)  # noqa: DOC603, DOC601 # single scalar is useless for plotting
-    _mode_E: jax.Array = private_field()
+    static_mode: bool = frozen_field(default=True)
+    _mode_E: jax.Array = private_field(default=None)
     _mode_H: jax.Array = private_field()
     _mode_neff: jax.Array = private_field()  # not required for detection, used for inspection
 
@@ -81,6 +83,12 @@ class ModeOverlapDetector(PhasorDetector):
         inv_permeabilities: jax.Array | float,
     ) -> Self:
         del key
+
+        if self.static_mode and self._mode_E is not None:
+            return self
+
+        if isinstance(inv_permittivities, jax.core.Tracer):
+            logger.warning(f'Solving {self.name} mode is part of compiled function.')
 
         inv_permittivity_slice = inv_permittivities[self.grid_slice]
         if isinstance(inv_permeabilities, jax.Array) and inv_permeabilities.ndim > 0:

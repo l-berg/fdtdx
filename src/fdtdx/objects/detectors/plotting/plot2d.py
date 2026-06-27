@@ -15,13 +15,19 @@ def plot_2d_slice(
     plot_dpi: int | None = None,
     log_scale: bool = False,
     contour_slice: np.ndarray | None = None,
+    ax = None,
+    colorbar: bool = True,
 ) -> Figure:
     if minval is None:
         minval = slice.min()
     if maxval is None:
         maxval = slice.max()
 
-    fig = plt.figure(figsize=(8, 6), dpi=plot_dpi)
+    if ax is None:
+        fig = plt.figure(figsize=(8, 6), dpi=plot_dpi)
+        ax = fig.add_subplot()
+    else:
+        fig = None
     # cmap = sns.diverging_palette(220, 20, as_cmap=True)
     colorbar_shrink = 0.5
 
@@ -32,7 +38,6 @@ def plot_2d_slice(
     del res[normal_axis]
 
     # Create XY plane plot
-    ax = fig.add_subplot()
     extent = (
         0,
         slice.shape[0] * res[0],
@@ -65,7 +70,10 @@ def plot_2d_slice(
     ax.set_xlabel(f"{axis_names[0]} axis (µm)")
     ax.set_ylabel(f"{axis_names[1]} axis (µm)")
 
-    plt.colorbar(mappable=cax, ax=ax, shrink=colorbar_shrink)
+    if colorbar:
+        cbar = plt.colorbar(mappable=cax, ax=ax, shrink=colorbar_shrink)
+        cbar.ax.set_ylabel('# of contacts', rotation=270)
+
 
     if contour_slice is not None:
         ax.contour(contour_slice.T, origin='lower', extent=extent, alpha=1, linewidths=0.1, colors='white') #, levels=1)

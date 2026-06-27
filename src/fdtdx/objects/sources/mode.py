@@ -4,6 +4,7 @@ from typing import Literal
 import jax
 import jax.numpy as jnp
 from matplotlib import pyplot as plt
+from loguru import logger
 
 from fdtdx.core.grid import calculate_time_offset_yee
 from fdtdx.core.jax.pytrees import autoinit, frozen_field, private_field
@@ -19,11 +20,16 @@ class ModePlaneSource(TFSFPlaneSource):
     filter_pol: Literal["te", "tm"] | None = frozen_field(default=None)
     edge_padding: int | None = frozen_field(default=None)
     mode_2d: bool = frozen_field(default=False)
+    static_mode: bool = frozen_field(default=True)
 
     _inv_permittivity: jax.Array = private_field()
     _inv_permeability: jax.Array | float = private_field()
 
+    _E: jax.Array = private_field(default=None)
+    _H: jax.Array = private_field()
     _neff: jax.Array = private_field()  # not required for sim, used for inspection
+    _time_offset_E: jax.Array = private_field()
+    _time_offset_H: jax.Array = private_field()
 
     def apply(
         self,
@@ -40,12 +46,22 @@ class ModePlaneSource(TFSFPlaneSource):
             or self.max_horizontal_offset != 0
         ):
             raise NotImplementedError()
+        
+        if self.static_mode and self._E is not None:
+            return self
+
+        if isinstance(inv_permittivities, jax.core.Tracer):
+            logger.warning(f'Solving {self.name} mode is part of compiled function.')
 
         inv_permittivity_slice = inv_permittivities[self.grid_slice]
         if isinstance(inv_permeabilities, jax.Array) and inv_permeabilities.ndim > 0:
             inv_permeability_slice = inv_permeabilities[self.grid_slice]
         else:
             inv_permeability_slice = inv_permeabilities
+
+        #if self._inv_permittivity is not None and (self._inv_permittivity == inv_permittivity_slice).all() and (self._inv_permeability == inv_permeability_slice).all():
+        #    # since nothing has changed, there is no need to recompute everything
+        #    return self
 
         self = self.aset("_inv_permittivity", inv_permittivity_slice, create_new_ok=True)
         self = self.aset("_inv_permeability", inv_permeability_slice, create_new_ok=True)

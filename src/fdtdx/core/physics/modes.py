@@ -112,11 +112,18 @@ def compute_mode(
 
     def mode_helper(permittivity, permeability):
         if mode_2d:
-            assert np.allclose(permittivity, permittivity[:, [0]]), "Permittivity is not uniform across the second axis!"
-            mode_2d_collapsed = permittivity.shape[1]
-            permittivity = permittivity[:, [0]]
+            dims_with_size_2 = [dim for dim, size in enumerate(permittivity.shape) if size == 2]
+            assert len(dims_with_size_2) == 1, f"Expected exactly one dimension with size 2 for mode_2d, found {len(dims_with_size_2)}"
+            collapsed_axis = dims_with_size_2[0]
+
+            slice_0 = tuple([0] if dim == collapsed_axis else slice(None) for dim in range(permittivity.ndim))
+            slice_1 = tuple([1] if dim == collapsed_axis else slice(None) for dim in range(permittivity.ndim))
+
+            assert np.allclose(permittivity[slice_0], permittivity[slice_1]), f"Permittivity is not uniform across collapsed axis!"
+            
+            permittivity = permittivity[slice_0]
             if isinstance(inv_permeabilities, jax.Array) and inv_permeabilities.ndim > 0:
-                permeability = permeability[:, [0]]
+                permeability = permeability[slice_0]
         if edge_padding:
             assert not mode_2d
             permittivity = np.pad(permittivity, pad_width=edge_padding, mode='edge')
@@ -169,8 +176,12 @@ def compute_mode(
             raise Exception("This should never happen")
         
         if mode_2d:
-            mode_E = np.repeat(mode_E[:, :, None], mode_2d_collapsed, axis=2)
-            mode_H = np.repeat(mode_H[:, :, None], mode_2d_collapsed, axis=2)
+            # mode_E = mode_E[:,:,None]
+            mode_E = np.expand_dims(mode_E, axis=collapsed_axis + 1)
+            mode_H = np.expand_dims(mode_H, axis=collapsed_axis + 1)
+            # span both grid cells back
+            mode_E = np.repeat(mode_E, 2, axis=collapsed_axis + 1)
+            mode_H = np.repeat(mode_H, 2, axis=collapsed_axis + 1)
 
         neff = np.asarray(mode.neff).astype(np.complex64)
         return mode_E, mode_H, neff
