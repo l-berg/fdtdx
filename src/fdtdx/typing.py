@@ -1,6 +1,7 @@
 from enum import Enum
 from typing import Literal, Optional
 
+import jax
 import jax.numpy as jnp
 
 # Real-valued shapes (physical dimensions)
@@ -55,6 +56,8 @@ PartialSlice3D = tuple[OptionalAxisSlice, OptionalAxisSlice, OptionalAxisSlice]
 
 BackendOption = Literal["gpu", "tpu", "cpu", "METAL"]
 """Backend options for JAX. Can be either gpu, tpu, cpu or METAL"""
+
+PmlAuxField = dict[str, tuple[jax.Array, jax.Array]]
 
 
 class ParameterType(Enum):
