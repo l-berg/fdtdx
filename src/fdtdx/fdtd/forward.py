@@ -20,6 +20,7 @@ def forward_single_args_wrapper(
     dispersive_c1: jax.Array | None,
     dispersive_c2: jax.Array | None,
     dispersive_c3: jax.Array | None,
+    dispersive_c4: jax.Array | None,
     detector_states: dict[str, DetectorState],
     recording_state: RecordingState | None,
     config: SimulationConfig,
@@ -39,6 +40,7 @@ def forward_single_args_wrapper(
     PmlAuxField,
     jax.Array,
     jax.Array | float,
+    jax.Array | None,
     jax.Array | None,
     jax.Array | None,
     jax.Array | None,
@@ -69,6 +71,7 @@ def forward_single_args_wrapper(
         dispersive_c1=dispersive_c1,
         dispersive_c2=dispersive_c2,
         dispersive_c3=dispersive_c3,
+        dispersive_c4=dispersive_c4,
         dispersive_inv_c2=dispersive_inv_c2,
     )
     state = forward(
@@ -93,6 +96,7 @@ def forward_single_args_wrapper(
         state[1].dispersive_c1,
         state[1].dispersive_c2,
         state[1].dispersive_c3,
+        state[1].dispersive_c4,
         state[1].detector_states,
         state[1].recording_state,
     )

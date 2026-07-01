@@ -14,6 +14,7 @@ API
     fdtdx.BrushConstraint2D
     fdtdx.calculate_sparam
     fdtdx.calculate_sparams
+    fdtdx.CCPRPole
     fdtdx.circular_brush
     fdtdx.ClosestIndex
     fdtdx.Color
@@ -48,6 +49,9 @@ API
     fdtdx.extruded_polygon_from_gds_path
     fdtdx.field
     fdtdx.FieldDetector
+    fdtdx.FieldProjectionAngleDetector
+    fdtdx.FieldProjectionCartesianDetector
+    fdtdx.FieldProjectionKSpaceDetector
     fdtdx.FieldState
     fdtdx.frozen_field
     fdtdx.frozen_private_field

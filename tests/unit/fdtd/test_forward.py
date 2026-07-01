@@ -312,6 +312,7 @@ class TestForwardSingleArgsWrapper:
                 dispersive_c1=None,
                 dispersive_c2=None,
                 dispersive_c3=None,
+                dispersive_c4=None,
                 detector_states=arrays.detector_states,
                 recording_state=arrays.recording_state,
                 config=config,
@@ -339,7 +340,7 @@ class TestForwardSingleArgsWrapper:
             assert call_kwargs["simulate_boundaries"] is True
 
     def test_wrapper_returns_all_14_unpacked_fields(self, arrays, config, objects, key):
-        """Wrapper unpacks the returned SimulationState into 14 individual values."""
+        """Wrapper unpacks the returned SimulationState into 15 individual values."""
         result_arrays = ArrayContainer(
             fields=FieldState(
                 E=arrays.fields.E * 2.0,
@@ -368,6 +369,7 @@ class TestForwardSingleArgsWrapper:
                 dispersive_c1=None,
                 dispersive_c2=None,
                 dispersive_c3=None,
+                dispersive_c4=None,
                 detector_states=arrays.detector_states,
                 recording_state=arrays.recording_state,
                 config=config,
@@ -378,7 +380,7 @@ class TestForwardSingleArgsWrapper:
                 simulate_boundaries=False,
             )
 
-            assert len(result) == 14
+            assert len(result) == 15
             assert result[0] == 7  # time_step
             assert jnp.array_equal(result[1], result_arrays.fields.E)
             assert jnp.array_equal(result[2], result_arrays.fields.H)
@@ -391,5 +393,6 @@ class TestForwardSingleArgsWrapper:
             assert result[9] is result_arrays.dispersive_c1
             assert result[10] is result_arrays.dispersive_c2
             assert result[11] is result_arrays.dispersive_c3
-            assert result[12] is result_arrays.detector_states
-            assert result[13] is result_arrays.recording_state
+            assert result[12] is result_arrays.dispersive_c4
+            assert result[13] is result_arrays.detector_states
+            assert result[14] is result_arrays.recording_state

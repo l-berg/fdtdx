@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 from fdtdx.config import SimulationConfig
+from fdtdx.constants import c as c0
 from fdtdx.dispersion import DispersionModel, DrudePole, LorentzPole, compute_pole_coefficients
 from fdtdx.fdtd.initialization import apply_params, place_objects
 from fdtdx.materials import Material
@@ -101,7 +102,7 @@ def test_dispersive_arrays_allocated(simple_config, simple_volume):
     assert jnp.all(arrays.fields.dispersive_P_prev == 0)
 
     # Coefficient values inside the slab should match compute_pole_coefficients.
-    c1_ref, c2_ref, c3_ref = compute_pole_coefficients(
+    c1_ref, c2_ref, c3_ref, _c4_ref = compute_pole_coefficients(
         material.dispersion.poles,
         config.time_step_duration,  # type: ignore[union-attr]
     )
@@ -326,7 +327,7 @@ def test_device_dispersive_continuous(simple_config, simple_volume):
     assert arrays.dispersive_c1.shape == (1, 1, 30, 30, 30)
 
     # Inside the device: coefficients should equal the drude coefficients.
-    c1_ref, c2_ref, c3_ref = compute_pole_coefficients(
+    c1_ref, c2_ref, c3_ref, _c4_ref = compute_pole_coefficients(
         materials["drude"].dispersion.poles,  # type: ignore[union-attr]
         config.time_step_duration,
     )
@@ -373,7 +374,7 @@ def test_device_dispersive_discrete(simple_config, simple_volume):
     drude_params = {name: jnp.ones_like(p) for name, p in params.items()}
     arrays, objects, _ = apply_params(arrays, objects, drude_params, key)
 
-    c1_ref, _, c3_ref = compute_pole_coefficients(
+    c1_ref, _, c3_ref, _ = compute_pole_coefficients(
         materials["drude"].dispersion.poles,  # type: ignore[union-attr]
         config.time_step_duration,
     )
@@ -445,7 +446,7 @@ def test_device_continuous_half_interpolation(simple_config, simple_volume):
     half_params = {name: 0.5 * jnp.ones_like(p) for name, p in params.items()}
     arrays_half, _, _ = apply_params(arrays, objects, half_params, key)
 
-    c1_ref, _, c3_ref = compute_pole_coefficients(
+    c1_ref, _, c3_ref, _ = compute_pole_coefficients(
         materials["drude"].dispersion.poles,  # type: ignore[union-attr]
         config.time_step_duration,
     )
@@ -510,7 +511,7 @@ def test_plane_source_apply_changes_with_dispersion(simple_config, simple_volume
 
     eps_inf = 1.0
     wavelength = 0.8e-6
-    omega = 2.0 * np.pi * 3e8 / wavelength
+    omega = 2.0 * np.pi * c0 / wavelength
     # Pick a resonance above omega for a low-loss, high-eps medium
     model = DispersionModel(poles=(LorentzPole(resonance_frequency=4.0e15, damping=1e11, delta_epsilon=3.0),))
 
