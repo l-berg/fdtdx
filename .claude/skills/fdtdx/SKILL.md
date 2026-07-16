@@ -60,7 +60,9 @@ _, arrays = fdtdx.full_backward(state=state, objects=objects, config=config, key
 
 **`place_objects()`** resolves all constraints iteratively (up to 1000 iterations), places objects on the grid, initializes E/H/PML field arrays, material arrays, detector states, and recording state.
 
-**`apply_params()`** runs the device parameter transformation pipeline and writes resulting permittivities into the array container. For CONTINUOUS output, uses linear interpolation between materials. For DISCRETE output, uses straight-through estimator (STE).
+**`apply_params()`** asks each device to materialize itself into the array container by calling `device.apply_to_arrays(arrays, params[name], **kwargs)`, then re-applies device-overlapping objects (sources). It no longer contains any device-specific material logic — the device owns it (see below). Its only remaining direct responsibility is restoring the pristine `initial_inv_permittivities` backup before applying background-dependent (etched) devices.
+
+**`Device.apply_to_arrays()`** is the device analogue of `SimulationObject.apply()`: given the current `ArrayContainer` and the device's params, it writes the device's inverse permittivity (and, when the sim is dispersive, the ADE `c1/c2/c3/c4` + `inv_c2`) into its own `grid_slice`. Subclasses override the protected `_compute_material_slices()` to change *what* is written; the base `Device` interpolates between its two materials (CONTINUOUS) or selects among N via STE (DISCRETE). `EtchedDevice` overrides it to blend each voxel's existing background permittivity with a single etch material, and reports `background_dependent = True`. A device has full control: it is not limited to weights in `[0,1]`, real permittivities, or isotropic materials, and can do its own sub-pixel smoothing.
 
 **`run_fdtd()`** dispatches to either `reversible_fdtd()` or `checkpointed_fdtd()` based on `config.gradient_config`.
 
@@ -161,7 +163,7 @@ Stability needs `γ·dt < 2`; physically `γ·dt ≪ 1`, so `c2 ≈ −1` and th
 
 **Restriction:** Dispersive materials cannot currently be combined with fully anisotropic (off-diagonal) permittivity **or electric conductivity** tensors — `_init_arrays` raises `NotImplementedError` (the full-tensor update branch has no ADE block). Isotropic and diagonally anisotropic ε/σ are both fine, including per-axis poles.
 
-**Devices with dispersive materials:** `apply_params` interpolates ADE coefficients the same way it interpolates `inv_permittivities` — linearly between the two bracketing materials for `CONTINUOUS` output, straight-through-estimator for `DISCRETE`. This is not equivalent to interpolating the pole *parameters*, but it keeps gradients smooth for inverse design.
+**Devices with dispersive materials:** a device interpolates ADE coefficients the same way it interpolates `inv_permittivities` (inside `Device._compute_material_slices`) — linearly between the two bracketing materials for `CONTINUOUS` output, gather-by-index for `DISCRETE`. This is not equivalent to interpolating the pole *parameters*, but it keeps gradients smooth for inverse design. (`EtchedDevice` does not yet support dispersive materials — it raises `NotImplementedError`.)
 
 **Evaluating χ(ω) / ε(ω) from stored coefficients** (useful in sources, detectors, setup-time analysis):
 - `susceptibility_from_coefficients(c1, c2, c3, omega, dt)` → JAX complex array of per-cell χ(ω), summed over poles.
@@ -299,6 +301,8 @@ device = fdtdx.Device(
 **Parameter types flow:** `CONTINUOUS` (float values interpolating between materials) -> `DISCRETE` (integer material indices). The STE (straight-through estimator) bridges discrete forward with continuous gradients.
 
 **Voxel indirection:** Devices have their own voxel grid independent of the simulation grid, allowing coarse optimization on a fine simulation mesh.
+
+**Materializing into the sim (refactored):** `apply_params` delegates all material writing to the device via `Device.apply_to_arrays()`; the device fully owns how its params become inverse permittivity / ADE coefficients (continuous vs discrete, isotropic vs anisotropic, dispersive, sub-pixel smoothing). To add a new device *behavior*, subclass `Device` and override `_compute_material_slices()` (returns a `_MaterialArraySlices`) rather than special-casing `fdtd.initialization`. `EtchedDevice` is the canonical example: it interpolates each voxel against the *existing background* permittivity + a single etch material (needs exactly 1 material, CONTINUOUS only), and sets `background_dependent = True` so `apply_params` restores the pristine `initial_inv_permittivities` before each application. The old `Device(use_etching=True)` flag is gone — use `EtchedDevice`.
 
 ## Sources
 

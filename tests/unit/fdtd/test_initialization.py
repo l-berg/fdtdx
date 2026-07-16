@@ -1,14 +1,16 @@
 import warnings
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import Mock, patch
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from fdtdx.config import SimulationConfig
 from fdtdx.constants import MAX_SIMULATION_VOLUME_CELLS
 from fdtdx.core.grid import RectilinearGrid, UniformGrid
-from fdtdx.fdtd.container import ArrayContainer, ObjectContainer
+from fdtdx.dispersion import DispersionModel, LorentzPole
+from fdtdx.fdtd.container import ObjectContainer
 from fdtdx.fdtd.initialization import (
     _apply_grid_coordinate_constraint,
     _apply_position_constraint,
@@ -25,10 +27,12 @@ from fdtdx.fdtd.initialization import (
     _update_grid_slices_from_shapes,
     _warn_if_simulation_volume_too_large,
     apply_params,
+    place_objects,
     resolve_object_constraints,
 )
-from fdtdx.materials import Material
-from fdtdx.objects.device.parameters.transform import ParameterType
+from fdtdx.materials import Material, compute_allowed_dispersive_coefficients
+from fdtdx.objects.device.device import Device, EtchedDevice
+from fdtdx.objects.device.parameters.discretization import ClosestIndex
 from fdtdx.objects.object import (
     GridCoordinateConstraint,
     PositionConstraint,
@@ -687,456 +691,240 @@ def test_handle_unresolved_objects_no_errors_when_resolved(simple_volume, simple
 
 
 # ---------------------------------------------------------------------------
-# apply_params - unit tests (mocked)
+# apply_params - device materialization (real devices)
 # ---------------------------------------------------------------------------
+#
+# The material-writing logic (continuous vs discrete, isotropic vs anisotropic,
+# plain vs etched, dispersive coefficients) used to live inline in apply_params
+# and was exercised here with heavily mocked devices. It now lives on the Device
+# (Device.apply_to_arrays / EtchedDevice), so these tests drive real devices
+# through the full place_objects + apply_params pipeline and check the resulting
+# inverse-permittivity / dispersive-coefficient arrays.
 
 
-def _make_arrays_mock(shape=(10, 10, 10)):
-    inv_perm = jnp.ones((3, *shape))
-    inv_permeab = jnp.ones((3, *shape))
-    arrays = Mock(spec=ArrayContainer)
-    arrays.inv_permittivities = inv_perm
-    arrays.inv_permeabilities = inv_permeab
-    arrays.dispersive_c1 = None
-    arrays.dispersive_c2 = None
-    arrays.dispersive_c3 = None
-    arrays.dispersive_c4 = None
-    arrays.electric_conductivity = None
-    arrays.dispersive_P_curr = None
-    arrays.dispersive_P_prev = None
-    arrays.initial_inv_permittivities = None
-    at_accessor = MagicMock()
-
-    def at_getitem(key):
-        at_result = Mock()
-
-        def set_side_effect(value):
-            result = Mock(spec=ArrayContainer)
-            result.inv_permittivities = value if key == "inv_permittivities" else inv_perm
-            result.inv_permeabilities = inv_permeab
-            result.dispersive_c1 = None
-            result.dispersive_c2 = None
-            result.dispersive_c3 = None
-            result.dispersive_c4 = None
-            result.electric_conductivity = None
-            result.at = at_accessor
-            return result
-
-        at_result.set = set_side_effect
-        return at_result
-
-    at_accessor.__getitem__ = Mock(side_effect=at_getitem)
-    arrays.at = at_accessor
-    return arrays
+def _device(cls=Device, *, materials, param_transforms=None, device_grid=(4, 4, 4)):
+    return cls(
+        name="Device",
+        materials=materials,
+        param_transforms=param_transforms or [],
+        partial_grid_shape=device_grid,
+        partial_voxel_grid_shape=(1, 1, 1),
+    )
 
 
-@patch("fdtdx.fdtd.initialization.compute_allowed_permittivities")
-def test_apply_params_continuous_type(mock_compute_perm):
-    mock_compute_perm.return_value = [[2.0, 2.0, 2.0], [4.0, 4.0, 4.0]]
-    device = Mock()
-    device.name = "device1"
-    device.output_type = ParameterType.CONTINUOUS
-    device.grid_slice = (slice(0, 10), slice(0, 10), slice(0, 10))
-    device.materials = [Mock(), Mock()]
-    device.use_etching = False
-    material_indices = jnp.ones((10, 10, 10)) * 0.5
-    device.return_value = material_indices
-    objects = Mock(spec=ObjectContainer)
-    objects.devices = [device]
-    objects.object_list = [device]
-    objects.volume_idx = 0
-    arrays = _make_arrays_mock()
-    params = {"device1": {}}
+def _apply_device_params(device, volume_material, params_value, *, grid_shape=(8, 8, 8)):
+    """Place volume + device, set constant params, apply, return (placed_device, arrays, config)."""
+    config = SimulationConfig(
+        time=1e-15,
+        grid=UniformGrid(spacing=50e-9),
+        backend="cpu",
+        gradient_config=None,
+    )
+    volume = SimulationVolume(partial_grid_shape=grid_shape, material=volume_material)
     key = jax.random.PRNGKey(0)
-    device.apply = Mock(return_value=device)
-    _result_arrays, _result_objects, _info = apply_params(arrays, objects, params, key)
-    assert device.call_count > 0
-    assert mock_compute_perm.called
+    objects, arrays, params, config, _ = place_objects(
+        object_list=[volume, device],
+        config=config,
+        constraints=[device.place_at_center(volume)],
+        key=key,
+    )
+    params["Device"] = jnp.full(jnp.asarray(params["Device"]).shape, params_value, dtype=jnp.float32)
+    arrays, objects, _ = apply_params(arrays, objects, params, key)
+    return objects["Device"], arrays, config
 
 
-@patch("fdtdx.fdtd.initialization.compute_allowed_permittivities")
-@patch("fdtdx.fdtd.initialization.straight_through_estimator")
-def test_apply_params_discrete_type(mock_ste, mock_compute_perm):
-    mock_compute_perm.return_value = [[2.0, 2.0, 2.0], [4.0, 4.0, 4.0]]
-    mock_ste.return_value = jnp.ones((10, 10, 10))
-    device = Mock()
-    device.name = "device1"
-    device.output_type = ParameterType.DISCRETE
-    device.grid_slice = (slice(0, 10), slice(0, 10), slice(0, 10))
-    device.materials = [Mock(), Mock()]
-    device.use_etching = False
-    material_indices = jnp.zeros((10, 10, 10), dtype=jnp.int32)
-    device.return_value = material_indices
-    objects = Mock(spec=ObjectContainer)
-    objects.devices = [device]
-    objects.object_list = [device]
-    objects.volume_idx = 0
-    arrays = _make_arrays_mock()
-    params = {"device1": {}}
+def test_apply_params_continuous_isotropic():
+    materials = {"air": Material(permittivity=1.0), "si": Material(permittivity=12.25)}
+    placed, arrays, _ = _apply_device_params(_device(materials=materials), Material(permittivity=1.0), 0.5)
+    region = arrays.inv_permittivities[:, *placed.grid_slice]
+    assert region.shape[0] == 1
+    # 50% interpolation between eps 1.0 and 12.25 -> 6.625
+    assert jnp.allclose(region, 1.0 / 6.625)
+    # background (air) outside the device is untouched
+    assert jnp.allclose(arrays.inv_permittivities[0, 0, 0, 0], 1.0)
+
+
+def test_apply_params_continuous_diagonally_anisotropic():
+    materials = {"air": Material(permittivity=1.0), "si": Material(permittivity=(12.25, 10.0, 8.0))}
+    placed, arrays, _ = _apply_device_params(_device(materials=materials), Material(permittivity=1.0), 0.5)
+    region = arrays.inv_permittivities[:, *placed.grid_slice]
+    assert region.shape[0] == 3
+    # per-axis 50% between 1.0 and (12.25, 10.0, 8.0) -> (6.625, 5.5, 4.5)
+    assert jnp.allclose(region[0], 1.0 / 6.625)
+    assert jnp.allclose(region[1], 1.0 / 5.5)
+    assert jnp.allclose(region[2], 1.0 / 4.5)
+
+
+def test_apply_params_continuous_fully_anisotropic():
+    tensor_b = (4.0, 1.0, 0.0, 1.0, 4.0, 0.0, 0.0, 0.0, 4.0)
+    materials = {"a": Material(permittivity=1.0), "b": Material(permittivity=tensor_b)}
+    placed, arrays, _ = _apply_device_params(_device(materials=materials), Material(permittivity=1.0), 0.5)
+    region = arrays.inv_permittivities[:, *placed.grid_slice]
+    assert region.shape[0] == 9
+    identity = np.array([1, 0, 0, 0, 1, 0, 0, 0, 1], dtype=float)
+    interp = 0.5 * identity + 0.5 * np.array(tensor_b)
+    expected = np.linalg.inv(interp.reshape(3, 3)).flatten()
+    assert np.allclose(np.array(region[:, 0, 0, 0]), expected, atol=1e-5)
+
+
+def test_apply_params_discrete_isotropic_selects_material():
+    materials = {"air": Material(permittivity=1.0), "si": Material(permittivity=12.25)}
+    device = _device(materials=materials, param_transforms=[ClosestIndex()])
+    # params 0.7 rounds to index 1 -> si
+    placed, arrays, _ = _apply_device_params(device, Material(permittivity=1.0), 0.7)
+    region = arrays.inv_permittivities[:, *placed.grid_slice]
+    assert jnp.allclose(region, 1.0 / 12.25)
+
+
+def test_apply_params_discrete_fully_anisotropic_selects_material():
+    tensor_b = (4.0, 1.0, 0.0, 1.0, 4.0, 0.0, 0.0, 0.0, 4.0)
+    materials = {"a": Material(permittivity=1.0), "b": Material(permittivity=tensor_b)}
+    device = _device(materials=materials, param_transforms=[ClosestIndex()])
+    # params 0.9 rounds to index 1 -> b
+    placed, arrays, _ = _apply_device_params(device, Material(permittivity=1.0), 0.9)
+    region = arrays.inv_permittivities[:, *placed.grid_slice]
+    assert region.shape[0] == 9
+    expected = np.linalg.inv(np.array(tensor_b).reshape(3, 3)).flatten()
+    assert np.allclose(np.array(region[:, 0, 0, 0]), expected, atol=1e-5)
+
+
+def test_apply_params_etched_continuous_isotropic():
+    # background eps 2.0, etch material eps 4.0, 50% mix -> eps 3.0 -> inv 1/3
+    device = _device(cls=EtchedDevice, materials={"etch": Material(permittivity=4.0)})
+    placed, arrays, _ = _apply_device_params(device, Material(permittivity=2.0), 0.5)
+    region = arrays.inv_permittivities[:, *placed.grid_slice]
+    assert jnp.allclose(region, 1.0 / 3.0)
+
+
+def test_apply_params_etched_continuous_diagonally_anisotropic():
+    # background diag(2,2,2), etch diag(1, 2, 4); 50% mix -> (1.5, 2.0, 3.0)
+    device = _device(cls=EtchedDevice, materials={"etch": Material(permittivity=(1.0, 2.0, 4.0))})
+    placed, arrays, _ = _apply_device_params(device, Material(permittivity=2.0), 0.5)
+    region = arrays.inv_permittivities[:, *placed.grid_slice]
+    assert region.shape[0] == 3
+    assert jnp.allclose(region[0], 1.0 / 1.5)
+    assert jnp.allclose(region[1], 1.0 / 2.0)
+    assert jnp.allclose(region[2], 1.0 / 3.0)
+
+
+def test_apply_params_etched_reset_is_idempotent():
+    # A background-dependent device must interpolate against the ORIGINAL background
+    # each time; re-applying the same params must not compound.
+    config = SimulationConfig(time=1e-15, grid=UniformGrid(spacing=50e-9), backend="cpu", gradient_config=None)
+    volume = SimulationVolume(partial_grid_shape=(8, 8, 8), material=Material(permittivity=2.0))
+    device = _device(cls=EtchedDevice, materials={"etch": Material(permittivity=4.0)})
     key = jax.random.PRNGKey(0)
-    device.apply = Mock(return_value=device)
-    _result_arrays, _result_objects, _info = apply_params(arrays, objects, params, key)
-    assert mock_ste.called
-    assert mock_compute_perm.called
+    objects, arrays, params, config, _ = place_objects(
+        object_list=[volume, device],
+        config=config,
+        constraints=[device.place_at_center(volume)],
+        key=key,
+    )
+    assert arrays.initial_inv_permittivities is not None  # backup allocated for the etched device
+    params["Device"] = jnp.full(jnp.asarray(params["Device"]).shape, 0.5, dtype=jnp.float32)
+    arrays1, objects, _ = apply_params(arrays, objects, params, key)
+    arrays2, objects, _ = apply_params(arrays1, objects, params, key)
+    placed = objects["Device"]
+    region1 = arrays1.inv_permittivities[:, *placed.grid_slice]
+    region2 = arrays2.inv_permittivities[:, *placed.grid_slice]
+    assert jnp.allclose(region1, region2)
+    assert jnp.allclose(region2, 1.0 / 3.0)
 
 
-def test_apply_params_no_devices():
-    """apply_params with no devices should still update sources."""
-    objects = Mock(spec=ObjectContainer)
-    objects.devices = []
-    mock_obj = Mock()
-    mock_obj.apply = Mock(return_value=mock_obj)
-    objects.object_list = [mock_obj]
-    objects.volume_idx = 0
-    arrays = _make_arrays_mock()
+def test_apply_params_device_dispersive_continuous_interpolates_coefficients():
+    disp = DispersionModel(poles=(LorentzPole(resonance_frequency=2e14, damping=1e13, delta_epsilon=2.0),))
+    materials = {"air": Material(permittivity=1.0), "si": Material(permittivity=4.0, dispersion=disp)}
+    placed, arrays, config = _apply_device_params(_device(materials=materials), Material(permittivity=1.0), 0.5)
+    assert arrays.dispersive_c1 is not None
+    num_poles = arrays.dispersive_c1.shape[0]
+    num_comp = arrays.dispersive_c1.shape[1]
+    c1, _, _, _ = compute_allowed_dispersive_coefficients(
+        materials, dt=config.time_step_duration, max_num_poles=num_poles, num_components=num_comp
+    )
+    # materials sorted by permittivity: air(1.0) idx 0 (non-dispersive -> c1=0), si(4.0) idx 1 has the pole.
+    # Continuous 50% mix -> region c1 == 0.5 * c1_si.
+    c1_si = jnp.asarray(c1[1], dtype=arrays.dispersive_c1.dtype)
+    region = arrays.dispersive_c1[:, :, *placed.grid_slice]
+    expected = jnp.broadcast_to(0.5 * c1_si[:, :, None, None, None], region.shape)
+    assert jnp.allclose(region, expected, atol=1e-6)
+
+
+def _grad_through_apply_params(device, volume_material, params_value):
+    """Return grad of sum(inv_permittivities) w.r.t. the device params, through apply_params."""
+    config = SimulationConfig(time=1e-15, grid=UniformGrid(spacing=50e-9), backend="cpu", gradient_config=None)
+    volume = SimulationVolume(partial_grid_shape=(8, 8, 8), material=volume_material)
     key = jax.random.PRNGKey(0)
-    _result_arrays, _result_objects, info = apply_params(arrays, objects, {}, key)
-    assert not mock_obj.apply.called  # apply should have been called in place_objects
+    objects, arrays, params, config, _ = place_objects(
+        object_list=[volume, device],
+        config=config,
+        constraints=[device.place_at_center(volume)],
+        key=key,
+    )
+    p0 = jnp.full(jnp.asarray(params["Device"]).shape, params_value, dtype=jnp.float32)
+
+    def loss(p):
+        cur = dict(params)
+        cur["Device"] = p
+        new_arrays, _, _ = apply_params(arrays, objects, cur, key)
+        return jnp.sum(new_arrays.inv_permittivities)
+
+    return jax.grad(loss)(p0)
+
+
+def test_apply_params_continuous_gradient_flows():
+    materials = {"air": Material(permittivity=1.0), "si": Material(permittivity=12.25)}
+    grad = _grad_through_apply_params(_device(materials=materials), Material(permittivity=1.0), 0.5)
+    assert jnp.all(jnp.isfinite(grad))
+    # A denser material lowers inv-permittivity, so increasing the weight decreases the loss.
+    assert jnp.all(grad < 0)
+
+
+def test_apply_params_discrete_gradient_flows_via_ste():
+    materials = {"air": Material(permittivity=1.0), "si": Material(permittivity=12.25)}
+    device = _device(materials=materials, param_transforms=[ClosestIndex()])
+    grad = _grad_through_apply_params(device, Material(permittivity=1.0), 0.7)
+    # The straight-through estimator keeps a finite, non-zero gradient despite the hard selection.
+    assert jnp.all(jnp.isfinite(grad))
+    assert jnp.any(grad != 0)
+
+
+def test_etched_device_requires_continuous_output():
+    config = SimulationConfig(time=1e-15, grid=UniformGrid(spacing=50e-9), backend="cpu", gradient_config=None)
+    device = _device(
+        cls=EtchedDevice,
+        materials={"air": Material(permittivity=1.0), "si": Material(permittivity=12.25)},
+        param_transforms=[ClosestIndex()],
+    )
+    with pytest.raises(Exception, match="only support continuous"):
+        device.place_on_grid(grid_slice_tuple=((0, 4), (0, 4), (0, 4)), config=config, key=jax.random.PRNGKey(0))
+
+
+def test_etched_device_requires_single_material():
+    config = SimulationConfig(time=1e-15, grid=UniformGrid(spacing=50e-9), backend="cpu", gradient_config=None)
+    device = _device(
+        cls=EtchedDevice,
+        materials={"air": Material(permittivity=1.0), "si": Material(permittivity=12.25)},
+    )
+    with pytest.raises(Exception, match="one material in etched device"):
+        device.place_on_grid(grid_slice_tuple=((0, 4), (0, 4), (0, 4)), config=config, key=jax.random.PRNGKey(0))
+
+
+def test_standard_device_continuous_requires_two_materials():
+    config = SimulationConfig(time=1e-15, grid=UniformGrid(spacing=50e-9), backend="cpu", gradient_config=None)
+    device = _device(materials={"only": Material(permittivity=4.0)})
+    with pytest.raises(Exception, match="exactly two materials"):
+        device.place_on_grid(grid_slice_tuple=((0, 4), (0, 4), (0, 4)), config=config, key=jax.random.PRNGKey(0))
+
+
+def test_apply_params_no_devices_leaves_arrays_unchanged():
+    config = SimulationConfig(time=1e-15, grid=UniformGrid(spacing=50e-9), backend="cpu", gradient_config=None)
+    volume = SimulationVolume(partial_grid_shape=(8, 8, 8), material=Material(permittivity=2.0))
+    key = jax.random.PRNGKey(0)
+    objects, arrays, params, config, _ = place_objects(object_list=[volume], config=config, constraints=[], key=key)
+    before = arrays.inv_permittivities
+    arrays, objects, info = apply_params(arrays, objects, params, key)
     assert isinstance(info, dict)
-
-
-@patch("fdtdx.fdtd.initialization.compute_allowed_permittivities")
-def test_apply_params_isotropic_components(mock_compute_perm):
-    """Test apply_params with isotropic (1-component) permittivity."""
-    mock_compute_perm.return_value = [[2.0], [4.0]]
-    device = Mock()
-    device.name = "device1"
-    device.output_type = ParameterType.CONTINUOUS
-    device.grid_slice = (slice(0, 5), slice(0, 5), slice(0, 5))
-    device.materials = [Mock(), Mock()]
-    device.use_etching = False
-    material_indices = jnp.ones((5, 5, 5)) * 0.5
-    device.return_value = material_indices
-
-    # 1-component (isotropic) arrays
-    inv_perm = jnp.ones((1, 10, 10, 10))
-    inv_permeab = jnp.ones((1, 10, 10, 10))
-    arrays = Mock(spec=ArrayContainer)
-    arrays.inv_permittivities = inv_perm
-    arrays.inv_permeabilities = inv_permeab
-    arrays.dispersive_c1 = None
-    arrays.dispersive_c2 = None
-    arrays.dispersive_c3 = None
-    arrays.dispersive_c4 = None
-    arrays.electric_conductivity = None
-    arrays.dispersive_P_curr = None
-    arrays.dispersive_P_prev = None
-    arrays.initial_inv_permittivities = None
-    at_accessor = MagicMock()
-
-    def at_getitem(key):
-        at_result = Mock()
-        at_result.set = lambda v: Mock(
-            spec=ArrayContainer,
-            inv_permittivities=v,
-            inv_permeabilities=inv_permeab,
-            dispersive_c1=None,
-            dispersive_c2=None,
-            dispersive_c3=None,
-            dispersive_c4=None,
-            electric_conductivity=None,
-            at=at_accessor,
-        )
-        return at_result
-
-    at_accessor.__getitem__ = Mock(side_effect=at_getitem)
-    arrays.at = at_accessor
-
-    objects = Mock(spec=ObjectContainer)
-    objects.devices = [device]
-    mock_obj = Mock()
-    mock_obj.apply = Mock(return_value=mock_obj)
-    objects.object_list = [mock_obj]
-    objects.volume_idx = 0
-    device.apply = Mock(return_value=device)
-    _result_arrays, _result_objects, _info = apply_params(arrays, objects, {"device1": {}}, jax.random.PRNGKey(0))
-    assert mock_compute_perm.called
-
-
-@patch("fdtdx.fdtd.initialization.compute_allowed_permittivities")
-def test_apply_params_fully_anisotropic_continuous(mock_compute_perm):
-    """Test apply_params with fully anisotropic (9-component) permittivity."""
-    identity_flat = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
-    two_x_flat = [2.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 2.0]
-    mock_compute_perm.return_value = [identity_flat, two_x_flat]
-
-    device = Mock()
-    device.name = "device1"
-    device.output_type = ParameterType.CONTINUOUS
-    device.grid_slice = (slice(0, 5), slice(0, 5), slice(0, 5))
-    device.materials = [Mock(), Mock()]
-    device.use_etching = False
-    material_indices = jnp.ones((5, 5, 5)) * 0.5
-    device.return_value = material_indices
-
-    # 9-component (fully anisotropic) arrays
-    inv_perm = jnp.ones((9, 10, 10, 10))
-    inv_permeab = jnp.ones((9, 10, 10, 10))
-    arrays = Mock(spec=ArrayContainer)
-    arrays.inv_permittivities = inv_perm
-    arrays.inv_permeabilities = inv_permeab
-    arrays.dispersive_c1 = None
-    arrays.dispersive_c2 = None
-    arrays.dispersive_c3 = None
-    arrays.dispersive_c4 = None
-    arrays.electric_conductivity = None
-    arrays.dispersive_P_curr = None
-    arrays.dispersive_P_prev = None
-    arrays.initial_inv_permittivities = None
-    at_accessor = MagicMock()
-
-    def at_getitem(key):
-        at_result = Mock()
-        at_result.set = lambda v: Mock(
-            spec=ArrayContainer,
-            inv_permittivities=v,
-            inv_permeabilities=inv_permeab,
-            dispersive_c1=None,
-            dispersive_c2=None,
-            dispersive_c3=None,
-            dispersive_c4=None,
-            electric_conductivity=None,
-            at=at_accessor,
-        )
-        return at_result
-
-    at_accessor.__getitem__ = Mock(side_effect=at_getitem)
-    arrays.at = at_accessor
-
-    objects = Mock(spec=ObjectContainer)
-    objects.devices = [device]
-    mock_obj = Mock()
-    mock_obj.apply = Mock(return_value=mock_obj)
-    objects.object_list = [mock_obj]
-    objects.volume_idx = 0
-    device.apply = Mock(return_value=device)
-    _result_arrays, _result_objects, _info = apply_params(arrays, objects, {"device1": {}}, jax.random.PRNGKey(0))
-    assert mock_compute_perm.called
-
-
-@patch("fdtdx.fdtd.initialization.compute_allowed_permittivities")
-@patch("fdtdx.fdtd.initialization.straight_through_estimator")
-def test_apply_params_fully_anisotropic_discrete(mock_ste, mock_compute_perm):
-    """Test apply_params discrete path with fully anisotropic (9-component) permittivity."""
-    identity_flat = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
-    two_x_flat = [2.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 2.0]
-    mock_compute_perm.return_value = [identity_flat, two_x_flat]
-    mock_ste.return_value = jnp.ones((9, 5, 5, 5))
-
-    device = Mock()
-    device.name = "device1"
-    device.output_type = ParameterType.DISCRETE
-    device.grid_slice = (slice(0, 5), slice(0, 5), slice(0, 5))
-    device.materials = [Mock(), Mock()]
-    device.use_etching = False
-    material_indices = jnp.zeros((5, 5, 5), dtype=jnp.int32)
-    device.return_value = material_indices
-
-    inv_perm = jnp.ones((9, 10, 10, 10))
-    inv_permeab = jnp.ones((9, 10, 10, 10))
-    arrays = Mock(spec=ArrayContainer)
-    arrays.inv_permittivities = inv_perm
-    arrays.inv_permeabilities = inv_permeab
-    arrays.dispersive_c1 = None
-    arrays.dispersive_c2 = None
-    arrays.dispersive_c3 = None
-    arrays.dispersive_c4 = None
-    arrays.electric_conductivity = None
-    arrays.dispersive_P_curr = None
-    arrays.dispersive_P_prev = None
-    arrays.initial_inv_permittivities = None
-    at_accessor = MagicMock()
-
-    def at_getitem(key):
-        at_result = Mock()
-        at_result.set = lambda v: Mock(
-            spec=ArrayContainer,
-            inv_permittivities=v,
-            inv_permeabilities=inv_permeab,
-            dispersive_c1=None,
-            dispersive_c2=None,
-            dispersive_c3=None,
-            dispersive_c4=None,
-            electric_conductivity=None,
-            at=at_accessor,
-        )
-        return at_result
-
-    at_accessor.__getitem__ = Mock(side_effect=at_getitem)
-    arrays.at = at_accessor
-
-    objects = Mock(spec=ObjectContainer)
-    objects.devices = [device]
-    mock_obj = Mock()
-    mock_obj.apply = Mock(return_value=mock_obj)
-    objects.object_list = [mock_obj]
-    objects.volume_idx = 0
-    device.apply = Mock(return_value=device)
-    _result_arrays, _result_objects, _info = apply_params(arrays, objects, {"device1": {}}, jax.random.PRNGKey(0))
-    assert mock_ste.called
-    assert mock_compute_perm.called
-
-
-@patch("fdtdx.fdtd.initialization.compute_allowed_permittivities")
-def test_apply_params_use_etching_continuous_isotropic(mock_compute_perm):
-    """Test apply_params etching path with continuous type and diagonally anisotropic components."""
-    # Etching interpolates between the old permittivity and perm_bc[0]
-    mock_compute_perm.return_value = [[4.0, 4.0, 4.0]]
-
-    device = Mock()
-    device.name = "device1"
-    device.output_type = ParameterType.CONTINUOUS
-    device.grid_slice = (slice(0, 5), slice(0, 5), slice(0, 5))
-    device.materials = [Mock()]
-    device.use_etching = True
-
-    # 50% etching mix
-    material_indices = jnp.ones((5, 5, 5)) * 0.5
-    device.return_value = material_indices
-
-    shape = (10, 10, 10)
-    # Background inverse permittivity is 0.5 (so permittivity is 2.0)
-    init_inv_perm = jnp.full((3, *shape), 0.5)
-    inv_permeab = jnp.ones((3, *shape))
-
-    arrays = Mock(spec=ArrayContainer)
-    arrays.initial_inv_permittivities = init_inv_perm
-    arrays.inv_permittivities = init_inv_perm
-    arrays.inv_permeabilities = inv_permeab
-    arrays.dispersive_c1 = None
-    arrays.dispersive_c2 = None
-    arrays.dispersive_c3 = None
-    arrays.dispersive_c4 = None
-    arrays.electric_conductivity = None
-    arrays.dispersive_P_curr = None
-    arrays.dispersive_P_prev = None
-
-    at_accessor = MagicMock()
-
-    def at_getitem(key):
-        at_result = Mock()
-
-        def set_side_effect(value):
-            result = Mock(spec=ArrayContainer)
-            result.inv_permittivities = value if key == "inv_permittivities" else arrays.inv_permittivities
-            result.initial_inv_permittivities = arrays.initial_inv_permittivities
-            result.inv_permeabilities = inv_permeab
-            result.dispersive_c1 = None
-            result.dispersive_c2 = None
-            result.dispersive_c3 = None
-            result.dispersive_c4 = None
-            result.electric_conductivity = None
-            result.dispersive_P_curr = None
-            result.dispersive_P_prev = None
-            result.at = at_accessor
-            return result
-
-        at_result.set = set_side_effect
-        return at_result
-
-    at_accessor.__getitem__ = Mock(side_effect=at_getitem)
-    arrays.at = at_accessor
-
-    objects = Mock(spec=ObjectContainer)
-    objects.devices = [device]
-    mock_obj = Mock()
-    mock_obj.apply = Mock(return_value=mock_obj)
-    objects.object_list = [mock_obj]
-    objects.volume_idx = 0
-    device.apply = Mock(return_value=device)
-
-    _result_arrays, _result_objects, _info = apply_params(arrays, objects, {"device1": {}}, jax.random.PRNGKey(0))
-
-    assert mock_compute_perm.called
-    assert device.call_count > 0
-    # Sanity check the math logic silently succeeded:
-    # Old perm = 2.0. Etch material perm = 4.0. Mix = 0.5 * 2.0 + 0.5 * 4.0 = 3.0.
-    # Resulting inv_perm should be 1/3.0.
-    final_inv_perm = _result_arrays.inv_permittivities
-    assert jnp.allclose(final_inv_perm[:, 0, 0, 0], 1.0 / 3.0)
-
-
-@patch("fdtdx.fdtd.initialization.compute_allowed_permittivities")
-def test_apply_params_use_etching_continuous_fully_anisotropic(mock_compute_perm):
-    """Test apply_params etching path with fully anisotropic (9-component) permittivity."""
-    # Etching material: Identity matrix for permittivity
-    identity_flat = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
-    mock_compute_perm.return_value = [identity_flat]
-
-    device = Mock()
-    device.name = "device1"
-    device.output_type = ParameterType.CONTINUOUS
-    device.grid_slice = (slice(0, 5), slice(0, 5), slice(0, 5))
-    device.materials = [Mock()]
-    device.use_etching = True
-
-    # 50% etching mix
-    material_indices = jnp.ones((5, 5, 5)) * 0.5
-    device.return_value = material_indices
-
-    shape = (10, 10, 10)
-    # Background inverse permittivity diagonal is 0.5 -> original permittivity is 2.0
-    init_inv_perm_flat = jnp.array([0.5, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.5])
-    init_inv_perm = jnp.tile(init_inv_perm_flat[:, None, None, None], (1, *shape))
-    inv_permeab = jnp.ones((9, *shape))
-
-    arrays = Mock(spec=ArrayContainer)
-    arrays.initial_inv_permittivities = init_inv_perm
-    arrays.inv_permittivities = init_inv_perm
-    arrays.inv_permeabilities = inv_permeab
-    arrays.dispersive_c1 = None
-    arrays.dispersive_c2 = None
-    arrays.dispersive_c3 = None
-    arrays.dispersive_c4 = None
-    arrays.electric_conductivity = None
-    arrays.dispersive_P_curr = None
-    arrays.dispersive_P_prev = None
-
-    at_accessor = MagicMock()
-
-    def at_getitem(key):
-        at_result = Mock()
-
-        def set_side_effect(value):
-            result = Mock(spec=ArrayContainer)
-            result.inv_permittivities = value if key == "inv_permittivities" else arrays.inv_permittivities
-            result.initial_inv_permittivities = arrays.initial_inv_permittivities
-            result.inv_permeabilities = inv_permeab
-            result.dispersive_c1 = None
-            result.dispersive_c2 = None
-            result.dispersive_c3 = None
-            result.dispersive_c4 = None
-            result.electric_conductivity = None
-            result.dispersive_P_curr = None
-            result.dispersive_P_prev = None
-            result.at = at_accessor
-            return result
-
-        at_result.set = set_side_effect
-        return at_result
-
-    at_accessor.__getitem__ = Mock(side_effect=at_getitem)
-    arrays.at = at_accessor
-
-    objects = Mock(spec=ObjectContainer)
-    objects.devices = [device]
-    mock_obj = Mock()
-    mock_obj.apply = Mock(return_value=mock_obj)
-    objects.object_list = [mock_obj]
-    objects.volume_idx = 0
-    device.apply = Mock(return_value=device)
-
-    _result_arrays, _result_objects, _info = apply_params(arrays, objects, {"device1": {}}, jax.random.PRNGKey(0))
-
-    assert mock_compute_perm.called
-    assert device.call_count > 0
-
-    # Validation check:
-    # Old perm = diag(2,2,2). Etch perm = diag(1,1,1). Mix = diag(1.5, 1.5, 1.5).
-    # Resulting inv_perm should be diag(1/1.5, 1/1.5, 1/1.5).
-    final_inv_perm = _result_arrays.inv_permittivities
-    assert jnp.allclose(final_inv_perm[0, 0, 0, 0], 1.0 / 1.5)  # xx component
-    assert jnp.allclose(final_inv_perm[1, 0, 0, 0], 0.0)  # xy component
+    assert jnp.allclose(arrays.inv_permittivities, before)
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 import math
 from abc import ABC
-from typing import Self, Sequence, cast
+from typing import TYPE_CHECKING, NamedTuple, Self, Sequence, cast
 
 import jax
 import jax.numpy as jnp
@@ -8,9 +8,10 @@ import jax.numpy as jnp
 from fdtdx.colors import XKCD_LIGHT_PINK, Color
 from fdtdx.config import SimulationConfig
 from fdtdx.core.jax.pytrees import autoinit, field, frozen_field, frozen_private_field
+from fdtdx.core.jax.ste import straight_through_estimator
 from fdtdx.core.jax.utils import check_specs
-from fdtdx.core.misc import expand_matrix, is_float_divisible
-from fdtdx.materials import Material
+from fdtdx.core.misc import expand_matrix, invert_property, is_float_divisible
+from fdtdx.materials import Material, compute_allowed_dispersive_coefficients, compute_allowed_permittivities
 from fdtdx.objects.device.parameters.transform import ParameterTransformation
 from fdtdx.objects.object import OrderableObject
 from fdtdx.typing import (
@@ -22,14 +23,40 @@ from fdtdx.typing import (
     SliceTuple3D,
 )
 
+if TYPE_CHECKING:
+    from fdtdx.fdtd.container import ArrayContainer
+
+
+class _MaterialArraySlices(NamedTuple):
+    """The material-property arrays a device writes into its own grid slice.
+
+    Every field is shaped for the device's placed ``grid_slice``. ``inv_permittivity``
+    has shape ``(num_components, *device_grid_shape)``; the dispersive coefficient
+    slices (when not ``None``) have shape ``(num_poles, num_disp_components, *device_grid_shape)``.
+    """
+
+    inv_permittivity: jax.Array
+    dispersive_c1: jax.Array | None = None
+    dispersive_c2: jax.Array | None = None
+    dispersive_c3: jax.Array | None = None
+    dispersive_c4: jax.Array | None = None
+
 
 @autoinit
 class Device(OrderableObject, ABC):
-    """Abstract base class for devices with optimizable permittivity distributions.
+    """Base class for devices with optimizable permittivity distributions.
 
-    This class defines the common interface and functionality for both discrete and
-    continuous devices that can be optimized through gradient-based methods.
+    A device owns a latent parameter array, maps it through its
+    ``param_transforms`` pipeline into per-voxel material weights/indices, and
+    then materializes those into the simulation's inverse-permittivity (and,
+    when present, dispersive ADE coefficient) arrays via :meth:`apply_to_arrays`.
 
+    This class implements the common "select/interpolate between the device's own
+    materials" behavior for both continuous and discrete parameterizations.
+    Subclasses override :meth:`_compute_material_slices` (and, if needed,
+    :meth:`_validate_materials` / :attr:`background_dependent`) to change how the
+    material properties are written — see :class:`EtchedDevice` for an example
+    that interpolates against the existing background material instead.
     """
 
     #: Dictionary of materials to be used in the device.
@@ -48,11 +75,6 @@ class Device(OrderableObject, ABC):
     #: Size of the material voxels used within the device in simulation voxels. Defaults to undefined shape.
     #: For all three axes, either the voxel grid or real shape needs to be defined.
     partial_voxel_real_shape: PartialRealShape3D = frozen_field(default=UNDEFINED_SHAPE_3D)
-
-    #: Determines the material placement behavior.
-    #: If False, the device fully populates its defined 3D space using its material permittivities.
-    #: If True, it acts as an etch, either leaving the space unmodified or replacing it with a single material (e.g., air) based on the parameters.
-    use_etching: bool = frozen_field(default=False)
 
     _single_voxel_grid_shape: tuple[int, int, int] = frozen_private_field(default=INVALID_SHAPE_3D)
     _matrix_voxel_grid_shape_override: tuple[int, int, int] = frozen_private_field(default=INVALID_SHAPE_3D)
@@ -138,6 +160,18 @@ class Device(OrderableObject, ABC):
                 f"{out_type}"
             )
         return out_type
+
+    @property
+    def background_dependent(self) -> bool:
+        """Whether this device reads the existing permittivity inside its region.
+
+        When ``True``, :func:`fdtdx.fdtd.initialization.apply_params` keeps a
+        pristine backup of the initial inverse permittivity and restores it before
+        every application so the device always interpolates against the original
+        background rather than its own previous output. The default standard device
+        overwrites its region outright and therefore returns ``False``.
+        """
+        return False
 
     def place_on_grid(
         self: Self,
@@ -244,25 +278,24 @@ class Device(OrderableObject, ABC):
 
         # set own input shape dtype
         self = self.aset("param_transforms", module_list)
-        if self.output_type == ParameterType.CONTINUOUS:
-            if self.use_etching:
-                if len(self.materials) != 1:
-                    raise Exception(
-                        f"Need exactly one material in etched device when parameter mapping outputs continuous permittivity indices "
-                        f"which replaces the eroded original materials, but got {self.materials}"
-                    )
-            else:
-                if len(self.materials) != 2:
-                    raise Exception(
-                        f"Need exactly two materials in device when parameter mapping outputs continuous permittivity indices, "
-                        f"but got {self.materials}"
-                    )
-        else:  # if self.output_type == ParameterType.BINARY or self.output_type == ParameterType.DISCRETE:
-            if self.use_etching:
-                raise Exception(
-                    f"Etched devices only support continuous parameters, {self.name} outputs {self.output_type}"
-                )
+        self._validate_materials()
         return self
+
+    def _validate_materials(self) -> None:
+        """Validate the material set against this device's output parameterization.
+
+        The standard device interpolates between exactly two materials for
+        continuous output and selects among any number of materials for discrete
+        output. Subclasses override this to encode their own requirements.
+
+        Raises:
+            Exception: If the material count is incompatible with the output type.
+        """
+        if self.output_type == ParameterType.CONTINUOUS and len(self.materials) != 2:
+            raise Exception(
+                "Need exactly two materials in device when parameter mapping outputs continuous permittivity "
+                f"indices, but got {self.materials}"
+            )
 
     @staticmethod
     def _overlap_weights_1d(sim_edges: jax.Array, design_edges: jax.Array) -> jax.Array:
@@ -365,3 +398,230 @@ class Device(OrderableObject, ABC):
         if expand_to_sim_grid:
             params = self._resample_design_params_to_sim_grid(params)
         return params
+
+    def apply_to_arrays(
+        self,
+        arrays: "ArrayContainer",
+        params: dict[str, jax.Array] | jax.Array,
+        **transform_kwargs,
+    ) -> "ArrayContainer":
+        """Materialize this device's parameters into the simulation material arrays.
+
+        Maps ``params`` through the parameter transformation pipeline and writes
+        the resulting inverse permittivity — and, when the simulation contains
+        dispersive materials, the per-cell ADE recurrence coefficients — into the
+        device's own grid slice of ``arrays``. This is the device analogue of
+        :meth:`~fdtdx.objects.object.SimulationObject.apply`: the device has full
+        control over what it writes and is not limited to interpolation weights in
+        ``[0, 1]``, real permittivities, or isotropic materials.
+
+        Subclasses customize the written values by overriding
+        :meth:`_compute_material_slices`; the mechanics of setting the slices into
+        the container (including recomputing the cached ``1/c2``) live here so they
+        stay consistent across device types.
+
+        Args:
+            arrays (ArrayContainer): Container holding the current material arrays.
+            params (dict[str, jax.Array] | jax.Array): This device's latent parameters.
+            **transform_kwargs: Extra keyword arguments forwarded to the parameter
+                transformation pipeline (e.g. a projection ``beta``).
+
+        Returns:
+            ArrayContainer: A copy of ``arrays`` with this device's region updated.
+        """
+        slices = self._compute_material_slices(arrays, params, **transform_kwargs)
+
+        new_inv_perm = arrays.inv_permittivities.at[:, *self.grid_slice].set(slices.inv_permittivity)
+        arrays = arrays.at["inv_permittivities"].set(new_inv_perm)
+
+        if slices.dispersive_c1 is not None:
+            assert (
+                arrays.dispersive_c1 is not None
+                and arrays.dispersive_c2 is not None
+                and arrays.dispersive_c3 is not None
+                and slices.dispersive_c2 is not None
+                and slices.dispersive_c3 is not None
+            )
+            new_c1 = arrays.dispersive_c1.at[:, :, *self.grid_slice].set(slices.dispersive_c1)
+            new_c2 = arrays.dispersive_c2.at[:, :, *self.grid_slice].set(slices.dispersive_c2)
+            new_c3 = arrays.dispersive_c3.at[:, :, *self.grid_slice].set(slices.dispersive_c3)
+            # Recompute inv_c2 from the post-update c2. Do NOT interpolate inv_c2
+            # directly: 1/avg(c2) != avg(1/c2), and the reverse-time ADE relies on
+            # inv_c2 being the exact reciprocal of the stored c2.
+            new_inv_c2 = jnp.where(new_c2 == 0, 0.0, 1.0 / new_c2)
+            arrays = arrays.at["dispersive_c1"].set(new_c1)
+            arrays = arrays.at["dispersive_c2"].set(new_c2)
+            arrays = arrays.at["dispersive_c3"].set(new_c3)
+            arrays = arrays.at["dispersive_inv_c2"].set(new_inv_c2)
+            if slices.dispersive_c4 is not None:
+                assert arrays.dispersive_c4 is not None
+                new_c4 = arrays.dispersive_c4.at[:, :, *self.grid_slice].set(slices.dispersive_c4)
+                arrays = arrays.at["dispersive_c4"].set(new_c4)
+
+        return arrays
+
+    def _compute_material_slices(
+        self,
+        arrays: "ArrayContainer",
+        params: dict[str, jax.Array] | jax.Array,
+        **transform_kwargs,
+    ) -> _MaterialArraySlices:
+        """Compute the material-property slices this device writes into its region.
+
+        The standard implementation interpolates (continuous output) between the
+        device's two materials, or selects (discrete output, via a straight-through
+        estimator) among any number of materials. The number of permittivity
+        components (1 / 3 / 9) and dispersive poles is inferred from the shapes of
+        the arrays already allocated for the whole simulation.
+
+        Args:
+            arrays (ArrayContainer): Container holding the current material arrays.
+            params (dict[str, jax.Array] | jax.Array): This device's latent parameters.
+            **transform_kwargs: Extra keyword arguments forwarded to ``__call__``.
+
+        Returns:
+            _MaterialArraySlices: The inverse permittivity and (optional) dispersive
+            coefficient slices sized for this device's grid slice.
+        """
+        cur_material_indices = self(params, expand_to_sim_grid=True, **transform_kwargs)
+
+        num_components = arrays.inv_permittivities.shape[0]
+        isotropic = num_components == 1
+        diagonally_anisotropic = num_components == 3
+
+        # (num_materials, num_components)
+        allowed_perm = jnp.asarray(
+            compute_allowed_permittivities(
+                self.materials,
+                isotropic=isotropic,
+                diagonally_anisotropic=diagonally_anisotropic,
+            )
+        )
+
+        # Dispersive coefficients are written whenever the simulation allocated
+        # them, even if this device's own materials are non-dispersive: the
+        # zero-padded coefficients then overwrite any stale values inherited from
+        # a dispersive region underneath the device.
+        write_dispersive = arrays.dispersive_c1 is not None
+        write_c4 = write_dispersive and arrays.dispersive_c4 is not None
+        allowed_c1 = allowed_c2 = allowed_c3 = allowed_c4 = None
+        if write_dispersive:
+            assert arrays.dispersive_c1 is not None
+            num_poles = arrays.dispersive_c1.shape[0]
+            num_disp_components = arrays.dispersive_c1.shape[1]
+            c1_np, c2_np, c3_np, c4_np = compute_allowed_dispersive_coefficients(
+                self.materials,
+                dt=self._config.time_step_duration,
+                max_num_poles=num_poles,
+                num_components=num_disp_components,
+            )
+            dtype = arrays.dispersive_c1.dtype
+            allowed_c1 = jnp.asarray(c1_np, dtype=dtype)
+            allowed_c2 = jnp.asarray(c2_np, dtype=dtype)
+            allowed_c3 = jnp.asarray(c3_np, dtype=dtype)
+            allowed_c4 = jnp.asarray(c4_np, dtype=dtype)
+
+        c1_slice = c2_slice = c3_slice = c4_slice = None
+
+        if self.output_type == ParameterType.CONTINUOUS:
+            # Linear interpolation between the two device materials.
+            perm_bc = allowed_perm[:, :, None, None, None]  # (2, num_components, 1, 1, 1)
+            perm_slice = perm_bc[0] + cur_material_indices * (perm_bc[1] - perm_bc[0])
+            inv_perm_slice = invert_property(perm_slice)
+            if write_dispersive:
+                assert allowed_c1 is not None and allowed_c2 is not None and allowed_c3 is not None
+                # allowed_cN[i]: (num_poles, num_disp_components); broadcast over the grid.
+                w0 = (1 - cur_material_indices)[None, None, ...]  # (1, 1, Nx, Ny, Nz)
+                w1 = cur_material_indices[None, None, ...]
+                c1_slice = w0 * allowed_c1[0][:, :, None, None, None] + w1 * allowed_c1[1][:, :, None, None, None]
+                c2_slice = w0 * allowed_c2[0][:, :, None, None, None] + w1 * allowed_c2[1][:, :, None, None, None]
+                c3_slice = w0 * allowed_c3[0][:, :, None, None, None] + w1 * allowed_c3[1][:, :, None, None, None]
+                if write_c4:
+                    assert allowed_c4 is not None
+                    c4_slice = w0 * allowed_c4[0][:, :, None, None, None] + w1 * allowed_c4[1][:, :, None, None, None]
+        else:
+            # Discrete material selection. Precompute inverse permittivities since
+            # the selection is a gather, then keep continuous gradients via STE.
+            if isotropic or diagonally_anisotropic:
+                inv_allowed = 1.0 / allowed_perm  # (num_materials, num_components)
+            else:
+                # Fully anisotropic: invert each 3x3 tensor and flatten back to 9 elements.
+                inv_allowed = jnp.array([jnp.linalg.inv(p.reshape(3, 3)).flatten() for p in allowed_perm])
+            int_idx = cur_material_indices.astype(jnp.int32)
+            # inv_allowed[int_idx]: (*grid, num_components) -> (num_components, *grid)
+            component_values = jnp.moveaxis(inv_allowed[int_idx], -1, 0)
+            inv_perm_slice = straight_through_estimator(cur_material_indices, component_values)
+            if write_dispersive:
+                assert allowed_c1 is not None and allowed_c2 is not None and allowed_c3 is not None
+                # allowed_cN[int_idx]: (*grid, num_poles, num_disp_components) -> (num_poles, num_disp_components, *grid)
+                c1_slice = jnp.moveaxis(allowed_c1[int_idx], (-2, -1), (0, 1))
+                c2_slice = jnp.moveaxis(allowed_c2[int_idx], (-2, -1), (0, 1))
+                c3_slice = jnp.moveaxis(allowed_c3[int_idx], (-2, -1), (0, 1))
+                if write_c4:
+                    assert allowed_c4 is not None
+                    c4_slice = jnp.moveaxis(allowed_c4[int_idx], (-2, -1), (0, 1))
+
+        return _MaterialArraySlices(inv_perm_slice, c1_slice, c2_slice, c3_slice, c4_slice)
+
+
+@autoinit
+class EtchedDevice(Device):
+    """A device that carves its region out of the existing background material.
+
+    Instead of blending between two of its own materials, an etched device blends
+    each voxel's *current* background permittivity with a single etch material
+    (e.g. air), controlled by the continuous parameter value: ``0`` leaves the
+    background untouched and ``1`` replaces it fully with the etch material. This
+    models a partially etched structure carved out of whatever material already
+    occupies the region (a substrate, a waveguide, ...).
+
+    Because the result depends on the material already present, an etched device is
+    :attr:`background_dependent` — ``apply_params`` restores the pristine
+    background before every application.
+    """
+
+    @property
+    def background_dependent(self) -> bool:
+        return True
+
+    def _validate_materials(self) -> None:
+        if self.output_type != ParameterType.CONTINUOUS:
+            raise Exception(
+                f"Etched devices only support continuous parameters, {self.name} outputs {self.output_type}"
+            )
+        if len(self.materials) != 1:
+            raise Exception(
+                "Need exactly one material in etched device when parameter mapping outputs continuous "
+                f"permittivity indices which replaces the eroded original materials, but got {self.materials}"
+            )
+
+    def _compute_material_slices(
+        self,
+        arrays: "ArrayContainer",
+        params: dict[str, jax.Array] | jax.Array,
+        **transform_kwargs,
+    ) -> _MaterialArraySlices:
+        if arrays.dispersive_c1 is not None:
+            raise NotImplementedError(
+                "Etched devices do not yet support dispersive materials. Use non-dispersive materials for the "
+                "etch material and its background, or a standard Device."
+            )
+        cur_material_indices = self(params, expand_to_sim_grid=True, **transform_kwargs)
+
+        num_components = arrays.inv_permittivities.shape[0]
+        isotropic = num_components == 1
+        diagonally_anisotropic = num_components == 3
+        # (1, num_components) — an etched device has exactly one material.
+        allowed_perm = jnp.asarray(
+            compute_allowed_permittivities(
+                self.materials,
+                isotropic=isotropic,
+                diagonally_anisotropic=diagonally_anisotropic,
+            )
+        )
+
+        etch_perm = allowed_perm[0][:, None, None, None]  # (num_components, 1, 1, 1)
+        background_perm = invert_property(arrays.inv_permittivities[:, *self.grid_slice])  # (num_components, *grid)
+        perm_slice = background_perm + cur_material_indices * (etch_perm - background_perm)
+        inv_perm_slice = invert_property(perm_slice)
+        return _MaterialArraySlices(inv_perm_slice)

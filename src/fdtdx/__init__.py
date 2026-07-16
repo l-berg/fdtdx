@@ -75,7 +75,7 @@ from fdtdx.objects.detectors.poynting_flux import (
     PhasorPoyntingFluxDetector,
     PoyntingFluxDetector,
 )
-from fdtdx.objects.device.device import Device
+from fdtdx.objects.device.device import Device, EtchedDevice
 from fdtdx.objects.device.parameters.continuous import (
     GaussianSmoothing2D,
     StandardToCustomRange,
@@ -183,6 +183,7 @@ __all__ = [
     "DrudePole",
     "DtypeConversion",
     "EnergyDetector",
+    "EtchedDevice",
     "ExtrudedPolygon",
     "FieldDetector",
     "FieldProjectionAngleDetector",

@@ -32,6 +32,35 @@ def expand_matrix(matrix: jax.Array, grid_points_per_voxel: tuple[int, ...]) -> 
     return expanded_matrix
 
 
+def invert_property(arr: jax.Array) -> jax.Array:
+    """Invert a material-property array of shape ``(num_components, *grid_shape)``.
+
+    Isotropic (1-component) and diagonally anisotropic (3-component) arrays are
+    inverted elementwise. Fully anisotropic (9-component) arrays are treated as a
+    stack of 3x3 tensors, inverted as matrices, and flattened back to 9 components.
+
+    Args:
+        arr (jax.Array): Property array with a leading component axis of size 1, 3 or 9.
+
+    Returns:
+        jax.Array: The inverted property array with the same shape.
+    """
+    num_components = arr.shape[0]
+    assert arr.ndim == 4 and num_components in [1, 3, 9], (
+        f"Expecting shape (num_comp, *grid_shape), got shape {arr.shape}"
+    )
+
+    if num_components in (1, 3):
+        return 1.0 / arr
+    # Full tensor inversion: move 9-component axis to the end, reshape, invert, and flatten back
+    arr_reshaped = jnp.moveaxis(arr, 0, -1)
+    spatial_shape = arr_reshaped.shape[:-1]
+    matrices = arr_reshaped.reshape(*spatial_shape, 3, 3)
+    inv_matrices = jnp.linalg.inv(matrices)
+    inv_flattened = inv_matrices.reshape(*spatial_shape, 9)
+    return jnp.moveaxis(inv_flattened, -1, 0)
+
+
 def ensure_slice_tuple(t: Sequence[slice | int | tuple[int, int]]) -> tuple[slice, ...]:
     """
     Ensures that all elements of the input sequence are converted to slices.
