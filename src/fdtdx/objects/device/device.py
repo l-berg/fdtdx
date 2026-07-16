@@ -705,8 +705,8 @@ class PermittivityConductivityDevice(Device):
     weight per voxel — so a voxel is always some blend of two *whole* materials — this
     device carries two weights per voxel and interpolates the two properties separately:
 
-    * the ``"permittivity"`` weight blends between the two materials' permittivities,
-    * the ``"conductivity"`` weight blends between their electric conductivities.
+    * the ``"perm"`` weight blends between the two materials' permittivities,
+    * the ``"cond"`` weight blends between their electric conductivities.
 
     A weight pair of ``(1, 0)`` therefore produces the permittivity of the second
     material combined with the conductivity of the first — a combination that need not
@@ -728,7 +728,7 @@ class PermittivityConductivityDevice(Device):
 
     @property
     def output_names(self) -> tuple[str, ...]:
-        return ("permittivity", "conductivity")
+        return ("perm", "cond")
 
     def _validate_materials(self) -> None:
         if self.output_type != ParameterType.CONTINUOUS:
@@ -765,8 +765,8 @@ class PermittivityConductivityDevice(Device):
             )
         weights = self(params, expand_to_sim_grid=True, **transform_kwargs)
         assert isinstance(weights, dict)
-        perm_weight = weights["permittivity"]
-        cond_weight = weights["conductivity"]
+        perm_weight = weights["perm"]
+        cond_weight = weights["cond"]
 
         num_components = arrays.inv_permittivities.shape[0]
         # (2, num_components) — ordered ascending by permittivity.
