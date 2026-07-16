@@ -1,17 +1,24 @@
 import math
+import warnings
 from abc import ABC
 from typing import TYPE_CHECKING, NamedTuple, Self, Sequence, cast
 
 import jax
 import jax.numpy as jnp
 
+from fdtdx import constants
 from fdtdx.colors import XKCD_LIGHT_PINK, Color
 from fdtdx.config import SimulationConfig
 from fdtdx.core.jax.pytrees import autoinit, field, frozen_field, frozen_private_field
 from fdtdx.core.jax.ste import straight_through_estimator
 from fdtdx.core.jax.utils import check_specs
 from fdtdx.core.misc import expand_matrix, invert_property, is_float_divisible
-from fdtdx.materials import Material, compute_allowed_dispersive_coefficients, compute_allowed_permittivities
+from fdtdx.materials import (
+    Material,
+    compute_allowed_dispersive_coefficients,
+    compute_allowed_electric_conductivities,
+    compute_allowed_permittivities,
+)
 from fdtdx.objects.device.parameters.transform import ParameterTransformation
 from fdtdx.objects.object import OrderableObject
 from fdtdx.typing import (
@@ -33,6 +40,9 @@ class _MaterialArraySlices(NamedTuple):
     Every field is shaped for the device's placed ``grid_slice``. ``inv_permittivity``
     has shape ``(num_components, *device_grid_shape)``; the dispersive coefficient
     slices (when not ``None``) have shape ``(num_poles, num_disp_components, *device_grid_shape)``.
+    ``electric_conductivity`` (when not ``None``) has shape
+    ``(num_cond_components, *device_grid_shape)`` and must already be scaled into the
+    dimensionless update coefficient — see :meth:`Device.conductivity_scale`.
     """
 
     inv_permittivity: jax.Array
@@ -40,6 +50,7 @@ class _MaterialArraySlices(NamedTuple):
     dispersive_c2: jax.Array | None = None
     dispersive_c3: jax.Array | None = None
     dispersive_c4: jax.Array | None = None
+    electric_conductivity: jax.Array | None = None
 
 
 @autoinit
@@ -148,18 +159,49 @@ class Device(OrderableObject, ABC):
         )
 
     @property
+    def output_names(self) -> tuple[str, ...]:
+        """Names of the arrays the parameter transformation pipeline must produce.
+
+        The pipeline is seeded with one array of shape :attr:`matrix_voxel_grid_shape`
+        per name, and :meth:`__call__` returns exactly these arrays. The default device
+        drives every material property from a single weight array, so it needs only one
+        channel. Subclasses that steer several properties independently override this to
+        request one channel per property — see :class:`PermittivityConductivityDevice`.
+        """
+        return ("params",)
+
+    @property
     def output_type(self) -> ParameterType:
+        """The parameter type produced by the transformation pipeline.
+
+        All channels in :attr:`output_names` must agree on one type: the material logic
+        branches on the parameterization as a whole (interpolate vs. select), not per
+        channel.
+        """
         if not self.param_transforms:
             return ParameterType.CONTINUOUS
         out_type = self.param_transforms[-1]._output_type
-        if isinstance(out_type, dict) and len(out_type) == 1:
-            out_type = next(iter(out_type.values()))
-        if not isinstance(out_type, ParameterType):
+        if not isinstance(out_type, dict):
+            return out_type
+        distinct_types = set(out_type.values())
+        if len(distinct_types) != 1:
             raise Exception(
-                "Output of Parameter transformation sequence (last module) needs to be a single array, but got: "
-                f"{out_type}"
+                f"The parameter mapping of {self.name} must produce arrays that all share a single "
+                f"ParameterType, but got: {out_type}"
             )
-        return out_type
+        return next(iter(distinct_types))
+
+    @property
+    def conductivity_scale(self) -> float:
+        """Factor converting a physical conductivity into the FDTD update coefficient.
+
+        Mirrors the ``conductivity_spacing`` scaling that
+        :func:`fdtdx.fdtd.initialization._init_arrays` applies to static objects, so a
+        device writing ``electric_conductivity`` lands on the same scale. On uniform
+        grids this equals the grid spacing; on stretched grids it is the reference
+        spacing implied by ``c0 * dt / courant``.
+        """
+        return constants.c * self._config.time_step_duration / self._config.courant_number
 
     @property
     def background_dependent(self) -> bool:
@@ -254,7 +296,7 @@ class Device(OrderableObject, ABC):
         # then we need to go forward through the transformations again to determine the parameter type of the
         # output
         new_t_list: list[ParameterTransformation] = []
-        cur_shape = {"params": self.matrix_voxel_grid_shape}
+        cur_shape = {name: self.matrix_voxel_grid_shape for name in self.output_names}
         for transform in self.param_transforms[::-1]:
             t_new = transform.init_module(
                 config=config,
@@ -266,9 +308,11 @@ class Device(OrderableObject, ABC):
             new_t_list.append(t_new)
             cur_shape = t_new._input_shape
 
-        # init shape of transformations by going backwards through new list
+        # init shape of transformations by going backwards through new list.
+        # cur_shape now describes the latent parameters entering the first transform, so
+        # its keys are exactly the channels init_params will create.
         module_list: list[ParameterTransformation] = []
-        cur_input_type = {"params": ParameterType.CONTINUOUS}
+        cur_input_type = {name: ParameterType.CONTINUOUS for name in cur_shape}
         for transform in new_t_list[::-1]:
             t_new = transform.init_type(
                 input_type=cur_input_type,
@@ -354,7 +398,7 @@ class Device(OrderableObject, ABC):
         if len(self.param_transforms) > 0:
             shapes = self.param_transforms[0]._input_shape
         else:
-            shapes = self.matrix_voxel_grid_shape
+            shapes = {name: self.matrix_voxel_grid_shape for name in self.output_names}
         if not isinstance(shapes, dict):
             shapes = {"params": shapes}
         params = {}
@@ -377,7 +421,24 @@ class Device(OrderableObject, ABC):
         params: dict[str, jax.Array] | jax.Array,
         expand_to_sim_grid: bool = False,
         **transform_kwargs,
-    ) -> jax.Array:
+    ) -> dict[str, jax.Array] | jax.Array:
+        """Map latent parameters through this device's transformation pipeline.
+
+        Args:
+            params (dict[str, jax.Array] | jax.Array): The device's latent parameters —
+                a bare array for single-channel devices, or one array per latent channel.
+            expand_to_sim_grid (bool): If True, resample every resulting channel from the
+                device's design-voxel grid onto the simulation grid.
+            **transform_kwargs: Extra keyword arguments forwarded to each transformation.
+
+        Returns:
+            dict[str, jax.Array] | jax.Array: The pipeline output — a bare array when the
+            device has a single channel (the common case), otherwise one array per name in
+            :attr:`output_names`.
+
+        Raises:
+            Exception: If the pipeline does not end with exactly :attr:`output_names`.
+        """
         if not isinstance(params, dict):
             params = {"params": params}
         # walk through modules
@@ -386,17 +447,17 @@ class Device(OrderableObject, ABC):
             params_dict = cast(dict[str, jax.Array], params)
             params = transform(params_dict, **transform_kwargs)
             check_specs(params, transform._output_shape)
-        if len(params) == 1:
-            single_val = next(iter(params.values()))
-            assert isinstance(single_val, jax.Array)
-            params = single_val
-        else:
+        params = cast(dict[str, jax.Array], params)
+        if set(params.keys()) != set(self.output_names):
             raise Exception(
-                "The parameter mapping should return a single array of indices. If using a continuous device, please"
-                " make sure that the latent transformations abide to this rule."
+                f"The parameter mapping of {self.name} should return exactly the arrays {self.output_names}, "
+                f"but got {tuple(params.keys())}. If using a continuous device, please make sure that the "
+                "latent transformations abide to this rule."
             )
         if expand_to_sim_grid:
-            params = self._resample_design_params_to_sim_grid(params)
+            params = {k: self._resample_design_params_to_sim_grid(v) for k, v in params.items()}
+        if len(self.output_names) == 1:
+            return params[self.output_names[0]]
         return params
 
     def apply_to_arrays(
@@ -408,8 +469,8 @@ class Device(OrderableObject, ABC):
         """Materialize this device's parameters into the simulation material arrays.
 
         Maps ``params`` through the parameter transformation pipeline and writes
-        the resulting inverse permittivity — and, when the simulation contains
-        dispersive materials, the per-cell ADE recurrence coefficients — into the
+        the resulting inverse permittivity — plus, when the device produces them, the
+        electric conductivity and the per-cell ADE recurrence coefficients — into the
         device's own grid slice of ``arrays``. This is the device analogue of
         :meth:`~fdtdx.objects.object.SimulationObject.apply`: the device has full
         control over what it writes and is not limited to interpolation weights in
@@ -433,6 +494,13 @@ class Device(OrderableObject, ABC):
 
         new_inv_perm = arrays.inv_permittivities.at[:, *self.grid_slice].set(slices.inv_permittivity)
         arrays = arrays.at["inv_permittivities"].set(new_inv_perm)
+
+        if slices.electric_conductivity is not None:
+            # _compute_material_slices only produces this slice when the array exists;
+            # allocation is decided sim-wide by _init_arrays from every object's materials.
+            assert arrays.electric_conductivity is not None
+            new_sigma_e = arrays.electric_conductivity.at[:, *self.grid_slice].set(slices.electric_conductivity)
+            arrays = arrays.at["electric_conductivity"].set(new_sigma_e)
 
         if slices.dispersive_c1 is not None:
             assert (
@@ -483,7 +551,8 @@ class Device(OrderableObject, ABC):
             _MaterialArraySlices: The inverse permittivity and (optional) dispersive
             coefficient slices sized for this device's grid slice.
         """
-        cur_material_indices = self(params, expand_to_sim_grid=True, **transform_kwargs)
+        # Single-channel device: __call__ returns a bare array.
+        cur_material_indices = cast(jax.Array, self(params, expand_to_sim_grid=True, **transform_kwargs))
 
         num_components = arrays.inv_permittivities.shape[0]
         isotropic = num_components == 1
@@ -606,7 +675,8 @@ class EtchedDevice(Device):
                 "Etched devices do not yet support dispersive materials. Use non-dispersive materials for the "
                 "etch material and its background, or a standard Device."
             )
-        cur_material_indices = self(params, expand_to_sim_grid=True, **transform_kwargs)
+        # Single-channel device: __call__ returns a bare array.
+        cur_material_indices = cast(jax.Array, self(params, expand_to_sim_grid=True, **transform_kwargs))
 
         num_components = arrays.inv_permittivities.shape[0]
         isotropic = num_components == 1
@@ -625,3 +695,109 @@ class EtchedDevice(Device):
         perm_slice = background_perm + cur_material_indices * (etch_perm - background_perm)
         inv_perm_slice = invert_property(perm_slice)
         return _MaterialArraySlices(inv_perm_slice)
+
+
+@autoinit
+class PermittivityConductivityDevice(Device):
+    """A device that optimizes permittivity and electric conductivity independently.
+
+    Where the standard :class:`Device` derives every material property from a single
+    weight per voxel — so a voxel is always some blend of two *whole* materials — this
+    device carries two weights per voxel and interpolates the two properties separately:
+
+    * the ``"permittivity"`` weight blends between the two materials' permittivities,
+    * the ``"conductivity"`` weight blends between their electric conductivities.
+
+    A weight pair of ``(1, 0)`` therefore produces the permittivity of the second
+    material combined with the conductivity of the first — a combination that need not
+    correspond to any real material in :attr:`materials`. That is the point: it lets a
+    gradient-based optimizer explore refractive index and loss as independent degrees of
+    freedom, which is useful for absorber and lossy-metasurface design.
+
+    Both weights are interpolated along the *same* material ordering (ascending
+    permittivity, see :func:`fdtdx.materials.compute_ordered_material_name_tuples`), so
+    weight ``0`` always means "first material's value" for both properties. The two
+    materials therefore bracket the reachable range of each property independently.
+
+    Notes:
+        The simulation only allocates a conductivity array when *some* material in the
+        whole simulation is lossy. If neither of this device's materials has an
+        ``electric_conductivity``, there is nothing to write into and the conductivity
+        channel is inert — the device warns and optimizes permittivity alone.
+    """
+
+    @property
+    def output_names(self) -> tuple[str, ...]:
+        return ("permittivity", "conductivity")
+
+    def _validate_materials(self) -> None:
+        if self.output_type != ParameterType.CONTINUOUS:
+            raise Exception(
+                f"{self.__class__.__name__} interpolates both material properties and therefore only supports "
+                f"continuous parameters, but {self.name} outputs {self.output_type}"
+            )
+        if len(self.materials) != 2:
+            raise Exception(
+                f"Need exactly two materials in {self.__class__.__name__} to bracket the permittivity and "
+                f"conductivity ranges, but got {self.materials}"
+            )
+        if not any(m.is_electrically_conductive for m in self.materials.values()):
+            warnings.warn(
+                f"{self.name} is a {self.__class__.__name__} but none of its materials {list(self.materials)} is "
+                "electrically conductive, so the conductivity channel has no range to interpolate over and cannot "
+                "affect the simulation. Give one of the materials a non-zero `electric_conductivity`, or use a "
+                "standard Device if you only want to optimize permittivity.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+    def _compute_material_slices(
+        self,
+        arrays: "ArrayContainer",
+        params: dict[str, jax.Array] | jax.Array,
+        **transform_kwargs,
+    ) -> _MaterialArraySlices:
+        if arrays.dispersive_c1 is not None:
+            raise NotImplementedError(
+                f"{self.__class__.__name__} does not support dispersive materials: the conductivity channel and an "
+                "ADE pole would both model loss, so their contributions could not be attributed. Use non-dispersive "
+                "materials, or a standard Device if you need dispersion."
+            )
+        weights = self(params, expand_to_sim_grid=True, **transform_kwargs)
+        assert isinstance(weights, dict)
+        perm_weight = weights["permittivity"]
+        cond_weight = weights["conductivity"]
+
+        num_components = arrays.inv_permittivities.shape[0]
+        # (2, num_components) — ordered ascending by permittivity.
+        allowed_perm = jnp.asarray(
+            compute_allowed_permittivities(
+                self.materials,
+                isotropic=num_components == 1,
+                diagonally_anisotropic=num_components == 3,
+            )
+        )
+        perm_bc = allowed_perm[:, :, None, None, None]  # (2, num_components, 1, 1, 1)
+        perm_slice = perm_bc[0] + perm_weight * (perm_bc[1] - perm_bc[0])
+        inv_perm_slice = invert_property(perm_slice)
+
+        sigma_slice = None
+        if arrays.electric_conductivity is not None:
+            num_cond_components = arrays.electric_conductivity.shape[0]
+            # Ordered by the same key as the permittivities, so index 0 is the same
+            # material in both stacks and weight 0 consistently means "first material".
+            allowed_sigma = jnp.asarray(
+                compute_allowed_electric_conductivities(
+                    self.materials,
+                    isotropic=num_cond_components == 1,
+                    diagonally_anisotropic=num_cond_components == 3,
+                ),
+                dtype=arrays.electric_conductivity.dtype,
+            )
+            sigma_bc = allowed_sigma[:, :, None, None, None]  # (2, num_cond_components, 1, 1, 1)
+            sigma_slice = sigma_bc[0] + cond_weight * (sigma_bc[1] - sigma_bc[0])
+            # Static objects are scaled the same way in _init_arrays; conductivity is
+            # stored as the dimensionless update coefficient, not in S/m.
+            sigma_slice = sigma_slice * self.conductivity_scale
+
+        return _MaterialArraySlices(inv_perm_slice, electric_conductivity=sigma_slice)

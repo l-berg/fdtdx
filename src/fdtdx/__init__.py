@@ -75,7 +75,7 @@ from fdtdx.objects.detectors.poynting_flux import (
     PhasorPoyntingFluxDetector,
     PoyntingFluxDetector,
 )
-from fdtdx.objects.device.device import Device, EtchedDevice
+from fdtdx.objects.device.device import Device, EtchedDevice, PermittivityConductivityDevice
 from fdtdx.objects.device.parameters.continuous import (
     GaussianSmoothing2D,
     StandardToCustomRange,
@@ -214,6 +214,7 @@ __all__ = [
     "PerfectMagneticConductor",
     "PerfectlyMatchedLayer",
     "PeriodicBoundary",
+    "PermittivityConductivityDevice",
     "PhasorDetector",
     "PhasorPoyntingFluxDetector",
     "PillarDiscretization",

@@ -35,6 +35,7 @@ API
     fdtdx.DetectorState
     fdtdx.Device
     fdtdx.EtchedDevice
+    fdtdx.PermittivityConductivityDevice
     fdtdx.DiagonalSymmetry2D
     fdtdx.DiagonalSymmetry3D
     fdtdx.DispersionModel
