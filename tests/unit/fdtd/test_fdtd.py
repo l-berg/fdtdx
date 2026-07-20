@@ -223,6 +223,57 @@ class TestReversibleFdtd:
         assert isinstance(arrs, ArrayContainer)
 
 
+class TestReversibleConductivityGrad:
+    """``electric_conductivity`` / ``magnetic_conductivity`` are VJP primals of
+    the reversible path (differentiable and free of leaked tracers).
+
+    Before the conductivity arrays were threaded through the custom VJP, closing
+    over them made ``jax.grad`` w.r.t. conductivity raise ``UnexpectedTracerError``
+    (a leaked tracer escaping the transformation). These fast tests guard that
+    regression and check the gradient has the conductivity's structure. The dummy
+    scene has no source, so ``reset()`` leaves the fields at zero and the value is
+    zero — the point here is *runs without a leak* + correct shape; numeric AD-vs-FD
+    correctness is covered by the simulation-tier tests in ``test_time_reversal``.
+    """
+
+    def _with_conductivity(self, dummy_arrays, field_shape):
+        arrays = dummy_arrays.aset("electric_conductivity", jnp.ones(field_shape) * 1e-2)
+        arrays = arrays.aset("magnetic_conductivity", jnp.ones(field_shape) * 1e-2)
+        return arrays
+
+    def test_grad_wrt_electric_conductivity_no_leak(
+        self, dummy_arrays, dummy_objects, config_few_steps, key, field_shape
+    ):
+        config, recording_state = _reversible_grad_config(config_few_steps, num_ckpt=0)
+        arrays = self._with_conductivity(dummy_arrays, field_shape).aset("recording_state", recording_state)
+
+        def loss(sigma_e):
+            a = arrays.aset("electric_conductivity", sigma_e)
+            _, out = reversible_fdtd(a, dummy_objects, config, key, show_progress=False)
+            return jnp.sum(out.fields.E**2) + jnp.sum(out.fields.H**2)
+
+        val, grad = jax.value_and_grad(loss)(arrays.electric_conductivity)
+        assert jnp.isfinite(val)
+        assert jnp.all(jnp.isfinite(grad))
+        assert grad.shape == arrays.electric_conductivity.shape
+
+    def test_grad_wrt_magnetic_conductivity_no_leak(
+        self, dummy_arrays, dummy_objects, config_few_steps, key, field_shape
+    ):
+        config, recording_state = _reversible_grad_config(config_few_steps, num_ckpt=0)
+        arrays = self._with_conductivity(dummy_arrays, field_shape).aset("recording_state", recording_state)
+
+        def loss(sigma_h):
+            a = arrays.aset("magnetic_conductivity", sigma_h)
+            _, out = reversible_fdtd(a, dummy_objects, config, key, show_progress=False)
+            return jnp.sum(out.fields.E**2) + jnp.sum(out.fields.H**2)
+
+        val, grad = jax.value_and_grad(loss)(arrays.magnetic_conductivity)
+        assert jnp.isfinite(val)
+        assert jnp.all(jnp.isfinite(grad))
+        assert grad.shape == arrays.magnetic_conductivity.shape
+
+
 class TestCheckpointedFdtd:
     def test_returns_simulation_state(self, dummy_arrays, dummy_objects, config_checkpointed, key):
         t, arrs = checkpointed_fdtd(dummy_arrays, dummy_objects, config_checkpointed, key)

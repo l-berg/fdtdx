@@ -15,6 +15,8 @@ def forward_single_args_wrapper(
     psi_H: PmlAuxField,
     inv_permittivities: jax.Array,
     inv_permeabilities: jax.Array,
+    electric_conductivity: jax.Array | None,
+    magnetic_conductivity: jax.Array | None,
     dispersive_P_curr: jax.Array | None,
     dispersive_P_prev: jax.Array | None,
     dispersive_c1: jax.Array | None,
@@ -29,8 +31,6 @@ def forward_single_args_wrapper(
     record_detectors: bool,
     record_boundaries: bool,
     simulate_boundaries: bool,
-    electric_conductivity: jax.Array | None = None,
-    magnetic_conductivity: jax.Array | None = None,
     dispersive_inv_c2: jax.Array | None = None,
 ) -> tuple[
     jax.Array,
@@ -46,13 +46,16 @@ def forward_single_args_wrapper(
     jax.Array | None,
     jax.Array | None,
     jax.Array | None,
+    jax.Array | None,
+    jax.Array | None,
     dict[str, DetectorState],
     RecordingState | None,
 ]:
     # Wrapper function that unpacks ArrayContainer into individual arrays for JAX transformations.
-    # ``electric_conductivity``, ``magnetic_conductivity`` and ``dispersive_inv_c2`` are
-    # passed as defaulted kwargs so callers can closure-capture them via ``functools.partial``
-    # without exposing them as VJP primals.
+    # ``electric_conductivity`` and ``magnetic_conductivity`` are positional pass-through arguments
+    # (returned unchanged): this makes them VJP primals so the reversible backward pass can
+    # accumulate cotangents w.r.t. them, exactly like ``inv_permittivities``. ``dispersive_inv_c2``
+    # stays a defaulted kwarg (closure-captured, stop_gradient'd — never a differentiation target).
     arr = ArrayContainer(
         fields=FieldState(
             E=E,
@@ -91,6 +94,8 @@ def forward_single_args_wrapper(
         state[1].fields.psi_H,
         state[1].inv_permittivities,
         state[1].inv_permeabilities,
+        state[1].electric_conductivity,
+        state[1].magnetic_conductivity,
         state[1].fields.dispersive_P_curr,
         state[1].fields.dispersive_P_prev,
         state[1].dispersive_c1,

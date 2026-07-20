@@ -609,6 +609,98 @@ class TestReversibleVsCheckpointedGradient:
             gy = float(jnp.max(jnp.abs(grad_rev[:, 1])))
             assert gx != gy
 
+    def test_gradients_agree_electric_conductivity_float64(self):
+        """Cross-validate gradient w.r.t. ``electric_conductivity`` in the
+        lossy+dispersive scene. σ_E is now a VJP primal of the reversible path
+        (threaded through ``forward_single_args_wrapper`` rather than closed
+        over); before that, ``jax.grad`` w.r.t. σ_E raised a leaked-tracer
+        error, so the reversible path had no σ_E gradient to compare at all.
+        The checkpointed path differentiates σ_E through standard autodiff."""
+
+        def run(method):
+            obj, arrays, config = _build_lossy_dispersive_scene(dtype=jnp.float64)
+            arrays, config = _attach_gradient(arrays, config, obj, method=method)
+
+            def loss_fn(sigma_e):
+                arr = ArrayContainer(
+                    fields=FieldState(
+                        E=arrays.fields.E,
+                        H=arrays.fields.H,
+                        psi_E=arrays.fields.psi_E,
+                        psi_H=arrays.fields.psi_H,
+                        dispersive_P_curr=arrays.fields.dispersive_P_curr,
+                        dispersive_P_prev=arrays.fields.dispersive_P_prev,
+                    ),
+                    inv_permittivities=arrays.inv_permittivities,
+                    inv_permeabilities=arrays.inv_permeabilities,
+                    detector_states=arrays.detector_states,
+                    recording_state=arrays.recording_state,
+                    electric_conductivity=sigma_e,
+                    magnetic_conductivity=arrays.magnetic_conductivity,
+                    dispersive_c1=arrays.dispersive_c1,
+                    dispersive_c2=arrays.dispersive_c2,
+                    dispersive_c3=arrays.dispersive_c3,
+                    dispersive_inv_c2=arrays.dispersive_inv_c2,
+                )
+                fdtd_impl = reversible_fdtd if method == "reversible" else checkpointed_fdtd
+                _, out = fdtd_impl(arr, obj, config, jax.random.PRNGKey(99), show_progress=False)
+                return jnp.sum(jnp.real(out.fields.E) ** 2)
+
+            return jax.value_and_grad(loss_fn)(arrays.electric_conductivity)
+
+        with _x64_enabled():
+            loss_rev, grad_rev = run("reversible")
+            loss_chk, grad_chk = run("checkpointed")
+            assert jnp.isfinite(loss_rev) and jnp.isfinite(loss_chk)
+            assert jnp.any(grad_rev != 0), "σ_E gradient must be nonzero — VJP must flow through the lossy factor"
+            assert jnp.allclose(loss_rev, loss_chk, rtol=1e-9, atol=1e-12)
+            max_abs = float(jnp.max(jnp.abs(grad_rev) + jnp.abs(grad_chk)))
+            max_diff = float(jnp.max(jnp.abs(grad_rev - grad_chk)))
+            rel = max_diff / (max_abs + 1e-30)
+            assert rel < 1e-5, f"σ_E gradient mismatch: max|Δ|={max_diff:.3e}, max|grad|={max_abs:.3e}, rel={rel:.3e}"
+
+    def test_gradients_agree_magnetic_conductivity_float64(self):
+        """Symmetric cross-check for ``magnetic_conductivity`` (σ_H) in the
+        magnetically-lossy scene. The reverse H update carries its own loss
+        factor, so a σ_H cotangent-routing bug would not surface in the σ_E
+        test."""
+
+        def run(method):
+            obj, arrays, config = _build_magnetic_lossy_scene(dtype=jnp.float64)
+            arrays, config = _attach_gradient(arrays, config, obj, method=method)
+
+            def loss_fn(sigma_h):
+                arr = ArrayContainer(
+                    fields=FieldState(
+                        E=arrays.fields.E,
+                        H=arrays.fields.H,
+                        psi_E=arrays.fields.psi_E,
+                        psi_H=arrays.fields.psi_H,
+                    ),
+                    inv_permittivities=arrays.inv_permittivities,
+                    inv_permeabilities=arrays.inv_permeabilities,
+                    detector_states=arrays.detector_states,
+                    recording_state=arrays.recording_state,
+                    electric_conductivity=arrays.electric_conductivity,
+                    magnetic_conductivity=sigma_h,
+                )
+                fdtd_impl = reversible_fdtd if method == "reversible" else checkpointed_fdtd
+                _, out = fdtd_impl(arr, obj, config, jax.random.PRNGKey(99), show_progress=False)
+                return jnp.sum(jnp.real(out.fields.H) ** 2)
+
+            return jax.value_and_grad(loss_fn)(arrays.magnetic_conductivity)
+
+        with _x64_enabled():
+            loss_rev, grad_rev = run("reversible")
+            loss_chk, grad_chk = run("checkpointed")
+            assert jnp.isfinite(loss_rev) and jnp.isfinite(loss_chk)
+            assert jnp.any(grad_rev != 0), "σ_H gradient must be nonzero"
+            assert jnp.allclose(loss_rev, loss_chk, rtol=1e-9, atol=1e-12)
+            max_abs = float(jnp.max(jnp.abs(grad_rev) + jnp.abs(grad_chk)))
+            max_diff = float(jnp.max(jnp.abs(grad_rev - grad_chk)))
+            rel = max_diff / (max_abs + 1e-30)
+            assert rel < 1e-5, f"σ_H gradient mismatch: max|Δ|={max_diff:.3e}, max|grad|={max_abs:.3e}, rel={rel:.3e}"
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Sliced reversible backward pass (num_checkpoints_reversible)

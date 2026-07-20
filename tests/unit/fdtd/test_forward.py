@@ -307,6 +307,8 @@ class TestForwardSingleArgsWrapper:
                 psi_H=arrays.fields.psi_H,
                 inv_permittivities=arrays.inv_permittivities,
                 inv_permeabilities=arrays.inv_permeabilities,
+                electric_conductivity=None,
+                magnetic_conductivity=None,
                 dispersive_P_curr=None,
                 dispersive_P_prev=None,
                 dispersive_c1=None,
@@ -339,8 +341,13 @@ class TestForwardSingleArgsWrapper:
             assert call_kwargs["record_boundaries"] is True
             assert call_kwargs["simulate_boundaries"] is True
 
-    def test_wrapper_returns_all_14_unpacked_fields(self, arrays, config, objects, key):
-        """Wrapper unpacks the returned SimulationState into 15 individual values."""
+    def test_wrapper_returns_all_17_unpacked_fields(self, arrays, config, objects, key):
+        """Wrapper unpacks the returned SimulationState into 17 individual values.
+
+        ``electric_conductivity`` / ``magnetic_conductivity`` are positional
+        pass-through outputs (VJP primals), so they appear at indices 7/8 between
+        ``inv_permeabilities`` and the dispersive polarization state.
+        """
         result_arrays = ArrayContainer(
             fields=FieldState(
                 E=arrays.fields.E * 2.0,
@@ -352,6 +359,8 @@ class TestForwardSingleArgsWrapper:
             inv_permeabilities=arrays.inv_permeabilities * 5.0,
             detector_states={"det1": Mock(spec=DetectorState)},
             recording_state=Mock(spec=RecordingState),
+            electric_conductivity=arrays.inv_permittivities * 6.0,
+            magnetic_conductivity=arrays.inv_permeabilities * 7.0,
         )
         mock_state = (jnp.array(7), result_arrays)
 
@@ -364,6 +373,8 @@ class TestForwardSingleArgsWrapper:
                 psi_H=arrays.fields.psi_H,
                 inv_permittivities=arrays.inv_permittivities,
                 inv_permeabilities=arrays.inv_permeabilities,
+                electric_conductivity=None,
+                magnetic_conductivity=None,
                 dispersive_P_curr=None,
                 dispersive_P_prev=None,
                 dispersive_c1=None,
@@ -380,7 +391,7 @@ class TestForwardSingleArgsWrapper:
                 simulate_boundaries=False,
             )
 
-            assert len(result) == 15
+            assert len(result) == 17
             assert result[0] == 7  # time_step
             assert jnp.array_equal(result[1], result_arrays.fields.E)
             assert jnp.array_equal(result[2], result_arrays.fields.H)
@@ -388,11 +399,13 @@ class TestForwardSingleArgsWrapper:
             assert result[4] is result_arrays.fields.psi_H
             assert jnp.array_equal(result[5], result_arrays.inv_permittivities)
             assert jnp.array_equal(result[6], result_arrays.inv_permeabilities)
-            assert result[7] is result_arrays.fields.dispersive_P_curr
-            assert result[8] is result_arrays.fields.dispersive_P_prev
-            assert result[9] is result_arrays.dispersive_c1
-            assert result[10] is result_arrays.dispersive_c2
-            assert result[11] is result_arrays.dispersive_c3
-            assert result[12] is result_arrays.dispersive_c4
-            assert result[13] is result_arrays.detector_states
-            assert result[14] is result_arrays.recording_state
+            assert result[7] is result_arrays.electric_conductivity
+            assert result[8] is result_arrays.magnetic_conductivity
+            assert result[9] is result_arrays.fields.dispersive_P_curr
+            assert result[10] is result_arrays.fields.dispersive_P_prev
+            assert result[11] is result_arrays.dispersive_c1
+            assert result[12] is result_arrays.dispersive_c2
+            assert result[13] is result_arrays.dispersive_c3
+            assert result[14] is result_arrays.dispersive_c4
+            assert result[15] is result_arrays.detector_states
+            assert result[16] is result_arrays.recording_state

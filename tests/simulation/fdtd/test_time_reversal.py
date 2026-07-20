@@ -1463,6 +1463,195 @@ class TestGradientMagneticConductivity:
             assert checked >= 1, "No active σ_H voxels found — scene misconfigured"
 
 
+def _sigma_fd_check(sigma, loss_fn, arrays, obj, config, key, fdtd_impl, n_voxels=8, h_scale=1e-4, h_floor=1e-7):
+    """Central-FD vs AD agreement at active (σ ≠ 0) voxels of ``sigma[0]``.
+
+    Sweeps every voxel with nonzero conductivity (component 0 = diagonal of the
+    9/3/1-tuple) and returns the worst ``(rel_err, diff, idx)`` triple plus the
+    number of voxels checked, for the assertion site to format.
+    """
+    _, grads = jax.value_and_grad(loss_fn)(sigma, arrays, obj, config, key, fdtd_impl)
+    sigma_diag = sigma[0]
+    xs, ys, zs = jnp.where(sigma_diag != 0, size=n_voxels, fill_value=-1)
+    worst = (0.0, 0.0, None)
+    checked = 0
+    for xi, yi, zi in zip(xs.tolist(), ys.tolist(), zs.tolist(), strict=True):
+        if xi < 0:
+            continue  # padding from fixed-size jnp.where
+        idx = (0, int(xi), int(yi), int(zi))
+        h = h_scale * float(jnp.abs(sigma[idx])) + h_floor
+        loss_plus = loss_fn(sigma.at[idx].add(h), arrays, obj, config, key, fdtd_impl)
+        loss_minus = loss_fn(sigma.at[idx].add(-h), arrays, obj, config, key, fdtd_impl)
+        fd = (loss_plus - loss_minus) / (2.0 * h)
+        ad = grads[idx]
+        diff = float(jnp.abs(ad - fd))
+        scale = float(jnp.abs(fd) + jnp.abs(ad)) + 1e-12
+        rel_err = diff / scale
+        if rel_err > worst[0]:
+            worst = (rel_err, diff, idx)
+        checked += 1
+    return worst, checked
+
+
+class TestGradientElectricConductivitySigma:
+    """The ``electric_conductivity`` array itself is a differentiable primal.
+
+    Threading σ_E through the reversible custom VJP (rather than closing over
+    it) both enables ``jax.grad`` w.r.t. σ_E and removes a leaked-tracer error
+    the closed-over conductivity previously raised. Verified by float64 AD-vs-FD
+    agreement at every lossy voxel, cross-checked against the checkpointed path
+    (standard autodiff through ``eqxi.while_loop``).
+    """
+
+    @staticmethod
+    def _build(dtype=jnp.float64):
+        config = SimulationConfig(
+            time=_SIM_TIME,
+            grid=UniformGrid(spacing=_RESOLUTION),
+            backend="cpu",
+            dtype=dtype,
+            courant_factor=0.99,
+            gradient_config=None,
+        )
+        objects, constraints = [], []
+        volume = fdtdx.SimulationVolume(partial_grid_shape=(_VOLUME_CELLS, _VOLUME_CELLS, _VOLUME_CELLS))
+        objects.append(volume)
+        bound_cfg = fdtdx.BoundaryConfig.from_uniform_bound(
+            thickness=_PML_CELLS,
+            override_types=_uniform_boundaries("periodic"),
+        )
+        bound_dict, c_list = fdtdx.boundary_objects_from_config(bound_cfg, volume)
+        objects.extend(bound_dict.values())
+        constraints.extend(c_list)
+
+        # Pure electric-conductivity slab (no dispersion) so the gradient path
+        # under test is only the lossy σ_E factor of the E update.
+        material = fdtdx.Material(permittivity=2.0, electric_conductivity=1e2)
+        slab_cells = _VOLUME_CELLS // 2
+        slab = fdtdx.UniformMaterialObject(
+            name="lossy_slab",
+            partial_grid_shape=(None, None, slab_cells),
+            material=material,
+        )
+        constraints.extend(
+            [
+                slab.same_size(volume, axes=(0, 1)),
+                slab.place_at_center(volume, axes=(0, 1)),
+                slab.set_grid_coordinates(axes=(2,), sides=("-",), coordinates=(_VOLUME_CELLS // 4,)),
+            ]
+        )
+        objects.append(slab)
+
+        omega = 2.0 * jnp.pi * c0 / 800e-9
+        source = fdtdx.PointDipoleSource(
+            name="dip",
+            partial_grid_shape=(1, 1, 1),
+            wave_character=fdtdx.WaveCharacter(frequency=float(omega) / (2.0 * float(jnp.pi))),
+            polarization=0,
+            amplitude=1.0,
+        )
+        constraints.append(
+            source.set_grid_coordinates(
+                axes=(0, 1, 2),
+                sides=("-", "-", "-"),
+                coordinates=(_VOLUME_CELLS // 2, _VOLUME_CELLS // 2, _VOLUME_CELLS // 2),
+            )
+        )
+        objects.append(source)
+
+        key = jax.random.PRNGKey(0)
+        obj_container, arrays, params, config, _ = fdtdx.place_objects(
+            object_list=objects,
+            config=config,
+            constraints=constraints,
+            key=key,
+        )
+        arrays, obj_container, _ = fdtdx.apply_params(arrays, obj_container, params, key)
+        arrays, config = _add_gradient_config(arrays, config, obj_container)
+        return obj_container, arrays, config
+
+    @staticmethod
+    def _loss_fn(electric_conductivity, arrays, objects, config, key, fdtd_impl):
+        arr = arrays.aset("electric_conductivity", electric_conductivity)
+        _, out = fdtd_impl(arr, objects, config, key, show_progress=False)
+        return jnp.sum(jnp.real(out.fields.E) ** 2)
+
+    def test_scene_has_active_conductivity(self):
+        _, arrays, _ = self._build(jnp.float32)
+        assert arrays.electric_conductivity is not None
+        assert jnp.any(arrays.electric_conductivity != 0), "Slab must have nonzero σ_E"
+
+    def test_gradients_finite_and_nonzero_reversible(self):
+        obj, arrays, config = self._build(jnp.float32)
+        key = jax.random.PRNGKey(99)
+        loss, grads = jax.value_and_grad(self._loss_fn)(
+            arrays.electric_conductivity, arrays, obj, config, key, reversible_fdtd
+        )
+        assert jnp.isfinite(loss) and loss > 0, "Source must drive nonzero fields"
+        assert jnp.all(jnp.isfinite(grads)), "σ_E gradient contains NaN/Inf"
+        assert jnp.any(grads != 0), "σ_E gradient must be nonzero — VJP must flow through the lossy factor"
+
+    def test_gradient_matches_finite_difference_multi_voxel(self):
+        with _x64_enabled():
+            obj, arrays, config = self._build(jnp.float64)
+            assert arrays.fields.E.dtype == jnp.float64
+            key = jax.random.PRNGKey(99)
+            sigma = arrays.electric_conductivity
+            ckpt_config = config.aset("gradient_config", GradientConfig(method="checkpointed", num_checkpoints=8))
+            for impl, cfg in ((reversible_fdtd, config), (checkpointed_fdtd, ckpt_config)):
+                (rel_err, diff, idx), checked = _sigma_fd_check(sigma, self._loss_fn, arrays, obj, cfg, key, impl)
+                assert checked >= 1, "No active σ_E voxels found — scene misconfigured"
+                assert rel_err < 1e-3 or diff < 1e-9, (
+                    f"{impl.__name__}: AD vs FD mismatch (σ_E) at {idx}: rel_err={rel_err:.3e}, diff={diff:.3e}"
+                )
+
+
+class TestGradientMagneticConductivitySigma:
+    """The ``magnetic_conductivity`` array itself is a differentiable primal.
+
+    Symmetric to ``TestGradientElectricConductivitySigma`` on the H side — the
+    reverse H update carries its own ``(1 ± c σ_H inv_μ / (2 η₀))`` factor, so a
+    cotangent-routing bug here would not surface in any σ_E test. Reuses the
+    magnetically-lossy slab scene of ``TestGradientMagneticConductivity``.
+    """
+
+    @staticmethod
+    def _build():
+        return TestGradientMagneticConductivity._build()
+
+    @staticmethod
+    def _loss_fn(magnetic_conductivity, arrays, objects, config, key, fdtd_impl):
+        arr = arrays.aset("magnetic_conductivity", magnetic_conductivity)
+        _, out = fdtd_impl(arr, objects, config, key, show_progress=False)
+        return jnp.sum(jnp.real(out.fields.H) ** 2)
+
+    def test_gradients_finite_and_nonzero_reversible(self):
+        with _x64_enabled():  # _build() is a float64 scene
+            obj, arrays, config = self._build()
+            key = jax.random.PRNGKey(99)
+            loss, grads = jax.value_and_grad(self._loss_fn)(
+                arrays.magnetic_conductivity, arrays, obj, config, key, reversible_fdtd
+            )
+            assert jnp.isfinite(loss) and loss > 0
+            assert jnp.all(jnp.isfinite(grads))
+            assert jnp.any(grads != 0), "σ_H gradient must be nonzero"
+
+    def test_gradient_matches_finite_difference_multi_voxel(self):
+        with _x64_enabled():
+            obj, arrays, config = self._build()  # float64 scene
+            assert arrays.magnetic_conductivity is not None
+            assert jnp.any(arrays.magnetic_conductivity != 0)
+            key = jax.random.PRNGKey(99)
+            sigma = arrays.magnetic_conductivity
+            ckpt_config = config.aset("gradient_config", GradientConfig(method="checkpointed", num_checkpoints=8))
+            for impl, cfg in ((reversible_fdtd, config), (checkpointed_fdtd, ckpt_config)):
+                (rel_err, diff, idx), checked = _sigma_fd_check(sigma, self._loss_fn, arrays, obj, cfg, key, impl)
+                assert checked >= 1, "No active σ_H voxels found — scene misconfigured"
+                assert rel_err < 1e-3 or diff < 1e-9, (
+                    f"{impl.__name__}: AD vs FD mismatch (σ_H) at {idx}: rel_err={rel_err:.3e}, diff={diff:.3e}"
+                )
+
+
 class TestGradientPMLBlochComplex:
     """End-to-end gradient test with PML + Bloch (complex fields).
 
