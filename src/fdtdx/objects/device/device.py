@@ -768,6 +768,10 @@ class PermittivityConductivityDevice(Device):
         perm_weight = weights["perm"]
         cond_weight = weights["cond"]
 
+        # HACK to match etched device
+        perm_weight = 1.0 - perm_weight
+        cond_weight = jnp.exp(cond_weight)
+
         num_components = arrays.inv_permittivities.shape[0]
         # (2, num_components) — ordered ascending by permittivity.
         allowed_perm = jnp.asarray(
@@ -801,3 +805,11 @@ class PermittivityConductivityDevice(Device):
             sigma_slice = sigma_slice * self.conductivity_scale
 
         return _MaterialArraySlices(inv_perm_slice, electric_conductivity=sigma_slice)
+
+    def init_params(
+        self,
+        key: jax.Array,
+    ) -> dict[str, jax.Array] | jax.Array:
+        params = super().init_params(key)
+        params['cond'] = jnp.zeros_like(params['cond'])
+        return params
